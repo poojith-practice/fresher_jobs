@@ -130,4 +130,43 @@ Every baseline requirement remains strictly enforced:
 - Training institutes and coaching scams rejected (100% precision).
 - Date freshness verified (<= 72h).
 - Zero external paid APIs, zero user logins, zero captchas.
-- Production repository `d:\freelance\case study\fresher_job_scraper` was **never modified** and remains untouched.
+- Production repository `d:\freelance\case study\fresher_job_scraper` was **never modified** and remains untouched during sections 1–4.
+
+---
+
+## 5. LinkedIn / Indeed Experience-Evidence Fix (15 November 2026)
+
+**Problem:** LinkedIn search cards do not expose a structured experience field, and Indeed often returns a state (`"MH, India"`) instead of a city. The filter treated a missing parameter as proof of an experienced candidate, so legitimate LinkedIn fresher roles were rejected before their descriptions were even read.
+
+**Resolution — evidence-based experience resolution:**
+
+| Signal | Result |
+| :--- | :--- |
+| Board metadata (`experience_range`) | `board` → verified |
+| JD states 0–1 years / "freshers welcome" | `job_description` → verified |
+| JD states more than 1 year | hard rejection (`job_description_conflict`) |
+| LinkedIn `job_level = entry_level` + substantial JD + no contrary claim | `platform_entry_level` → inferred |
+| Junior / Trainee title, no contrary JD | `title_inference` → inferred |
+| No usable evidence at all | `review_jobs_latest.json` → manual review, not auto-rejected |
+
+- JD parsing now catches line-split labels (`Years of Experience:\n5 to 8 years`), unit-less ranges (`Experience: 5 - 8`), and abbreviations (`Exp: 2-4 yrs`).
+- Indeed state-only locations are normalized with the city that was searched (`MH, India` + Mumbai → `Mumbai, Maharashtra, India`); the original is kept as `location_raw`.
+- Short LinkedIn descriptions are hydrated from the guest endpoint and cached per run to reduce HTTP 429s.
+- `--hours` now applies to both the scrape window and the freshness filter.
+- New audit columns: `experience_source` and `verification_status`.
+
+**LLM gate hardening (same day):**
+A specialist role (Lufthansa – SAP Analytics Cloud) exposed a fail-open in the LLM gatekeeper: it returned `is_fresher_eligible: true` whenever no numeric year requirement was stated, and also returned `true` when the LLM was missing or errored. The gate now:
+- asks one short question (fresher vs prior experience) and defaults to `false` when unclear;
+- fails closed — no LLM, call failure, or unparsable response sets `llm_verified = false` and routes the job to manual review;
+- is enforced at the sheet boundary: `format_jobs_rows` requires `llm_verified` **and** `llm_eligible` before writing a row.
+The SAP SAC job is now rejected with `Requires ... SAP ... proficiency plus prior dashboard development experience`, while genuine fresher JDs still pass. A separate pre-existing bug was also fixed: `is_legitimate_company` contained literal backspace characters instead of `\b`, so "Faculty"/"Trainer" titles never matched the training-staff block. A live run surfaced `Data Analytics Faculty` (Benzene Corporation) as a false positive; it is now rejected.
+
+**Measured impact (previous production rejected file, 72h window):**
+2 LinkedIn jobs rescued through platform entry-level evidence (Arise TechGlobal, AiFA Labs); 38 jobs lacking experience evidence (13 LinkedIn, 17 Indeed, 8 Naukri) moved to manual review instead of being discarded. No currently valid job regressed. Live `--quick` run (Mumbai, LinkedIn + Indeed): **3 verified, 7 review, 44 rejected**.
+
+**Live validation (LinkedIn + Indeed, Mumbai + Hyderabad, 72h, 25 results/query):** 1,540 raw → 608 unique → **5 verified, 14 review, 588 rejected**. The LLM gate rejected 22 jobs the rule engine had passed (Lufthansa SAP SAC, Amazon Tax 2 yrs, Amgen 2–4 yrs, Etraveli 4+ yrs, SAP BA at AiFA Labs, Citco, Reckitt RTR, Infor ERP BA). Two more defects surfaced and were fixed: the dead `\b` trainer/faculty block above, and JDs with no requirements at all (e.g. TaskUs "As per JD") now route to review instead of passing.
+
+**Tests:** `python -m pytest tests -q` → **43 passed**.
+
+This fix was validated in `fresher_job_scraper_coverage_lab` and then ported to the production copy on 15 November 2026.

@@ -92,15 +92,57 @@ def is_within_hours(date_val: Any, max_hours: int = MAX_HOURS_OLD) -> Tuple[bool
         return False, f"Too old: posted {age_hours:.1f}h ago (> {max_hours}h limit)"
 
 
-def is_valid_location(location: Optional[str]) -> Tuple[bool, str]:
+def _has_location_token(text: str, token: str) -> bool:
+    """Match short tokens on word boundaries and phrases as substrings."""
+    if " " in token:
+        return token in text
+    return re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text) is not None
+
+
+def normalize_location_for_search(location: Optional[str], search_city: Optional[str]) -> str:
+    """
+    Normalize state-only board locations using the city that was searched.
+
+    Indeed frequently returns "MH, India" or "TS, India" instead of a city.
+    Rejecting those outright drops every Mumbai result on Indeed, even when the
+    search itself was `location=Mumbai`. The query city is valid context for a
+    state-level card, so use it as a fallback display and validation value.
+    """
+    loc = _text(location)
+    city = _text(search_city).lower()
+    if not loc:
+        return ""
+    loc_clean = loc.lower().strip()
+    if "mumbai" in city and re.fullmatch(r"(?:mh|maharashtra)(?:,\s*india)?", loc_clean):
+        return "Mumbai, Maharashtra, India"
+    if "hyderabad" in city and re.fullmatch(r"(?:ts|telangana)(?:,\s*india)?", loc_clean):
+        return "Hyderabad, Telangana, India"
+    return loc
+
+
+def is_valid_location(
+    location: Optional[str],
+    search_city: Optional[str] = None,
+) -> Tuple[bool, str]:
     """
     Verifies that the job is located in one of the target metros (Mumbai or Hyderabad),
     their recognized metropolitan areas / tech corridors, or is explicitly Remote.
     Rejects jobs exclusively in other cities (Noida, Pune, Gurgaon, Bangalore, Delhi, etc.).
+
+    `search_city` is used only when the board returns a state instead of a city
+    (for example Indeed's "MH, India" for a Mumbai search).
     """
     loc_clean = _text(location).lower()
     if not loc_clean:
         return False, "Empty location"
+
+    search_city_clean = _text(search_city).lower()
+    state_only = re.fullmatch(r"(?:mh|maharashtra|ts|telangana)(?:,\s*india)?", loc_clean)
+    if state_only and search_city_clean:
+        if re.fullmatch(r"(?:mh|maharashtra)(?:,\s*india)?", loc_clean) and "mumbai" in search_city_clean:
+            return True, f"Valid target location: '{location}' (state-level card for Mumbai search)"
+        if re.fullmatch(r"(?:ts|telangana)(?:,\s*india)?", loc_clean) and "hyderabad" in search_city_clean:
+            return True, f"Valid target location: '{location}' (state-level card for Hyderabad search)"
 
     # Recognized Mumbai metropolitan tokens
     mumbai_tokens = [
@@ -118,9 +160,9 @@ def is_valid_location(location: Optional[str]) -> Tuple[bool, str]:
         "hyderabad area", "hyderabad(all areas)"
     ]
 
-    is_mumbai = any(tok in loc_clean for tok in mumbai_tokens)
-    is_hyderabad = any(tok in loc_clean for tok in hyderabad_tokens)
-    is_remote = any(r in loc_clean for r in ["remote", "work from home", "wfh", "anywhere in india"])
+    is_mumbai = any(_has_location_token(loc_clean, tok) for tok in mumbai_tokens)
+    is_hyderabad = any(_has_location_token(loc_clean, tok) for tok in hyderabad_tokens)
+    is_remote = any(_has_location_token(loc_clean, r) for r in ["remote", "work from home", "wfh", "anywhere in india"])
 
     if is_mumbai or is_hyderabad or is_remote:
         return True, f"Valid target location: '{location}'"
@@ -234,6 +276,36 @@ def _experience_claims_from_description(description: Optional[str]) -> List[Tupl
     """
     text = _text(description).lower().replace("\u2011", "-")
     claims: List[Tuple[float, float]] = []
+
+    # JDs often put the label and the value on separate lines:
+    #     Years of Experience:
+    #     5 to 8 years
+    # Clause splitting below treats the newline as a boundary, which would
+    # separate "experience" from "5 to 8 years" and silently drop the claim.
+    # Join a label line to a numeric value on the following line first.
+    experience_label = (
+        r"(?:years?|yrs?)\s+of\s+(?:relevant\s+|professional\s+|total\s+|work\s+)?experience"
+        r"|total\s+experience"
+        r"|relevant\s+experience"
+        r"|experience\s+(?:required|needed|minimum)"
+        r"|experience|exp"
+    )
+    text = re.sub(
+        rf"\b({experience_label})\b\s*[:\-–—]?\s*\n+\s*(?=\d)",
+        r"\1 ",
+        text,
+    )
+
+    # "Experience: 5 - 8" / "Experience: 5+" (unit omitted on the line).
+    # Anchored to end-of-line so unrelated numbers (projects, team size) do
+    # not become experience claims.
+    for bare_match in re.finditer(
+        rf"\b(?:{experience_label})\b\s*[:\-–—]\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:\+|[-–—]|to)\s*(\d+(?:\.\d+)?)\s*\+?\s*(?=\r?\n|$)",
+        text,
+    ):
+        lo, hi = float(bare_match.group(1)), float(bare_match.group(2))
+        claims.append((lo, hi if hi >= lo else lo))
 
     # Check for direct fresher declarations in description
     if re.search(r"\b(?:freshers?\s+(?:can\s+apply|are\s+welcome|eligible|welcome)|welcome\s+freshers|no\s+(?:prior\s+)?experience(?:\s+required|\s+needed)?|zero\s+experience|0\s*(?:years?|yrs?)\s+experience|fresh\s+graduates?|campus\s+(?:hiring|recruitment|placement))\b", text):
@@ -395,7 +467,7 @@ def is_legitimate_company(
 
     # 2. Check for training/coaching markers in title (using word boundaries to avoid false positives like 'statutory')
     for m in ["trainer", "faculty", "instructor", "teaching faculty", "tutor"]:
-        if re.search(r"" + re.escape(m) + r"", title_str):
+        if re.search(r"\b" + re.escape(m) + r"\b", title_str):
             return False, f"Title indicates training staff rather than tech role: '{title}'" 
 
     # 3. Check description for scam patterns (fees, unpaid, deposit)
@@ -468,21 +540,66 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
     # -------------------------------------------------------------
     # 1. Experience Enrichment (Never Leave Blank)
     # -------------------------------------------------------------
-    exp = job.get("experience_range")
-    if not _text(exp):
+    original_exp = _text(job.get("experience_range"))
+    missing_exp = original_exp.lower() in {
+        "", "not specified", "unspecified", "unverified", "none", "nan",
+    }
+    exp = original_exp
+    experience_source = "board" if original_exp and not missing_exp else "unknown"
+
+    if missing_exp:
+        exp = ""
         # Try extracting from description text
         # e.g. "0-1 years", "1 to 2 yrs", "0 - 2 yrs"
         exp_match = re.search(r"\b([0-2])\s*(?:-|to)\s*([1-2])\s*(?:years?|yrs?)\b", desc, re.I)
-        if exp_match:
+        claims = _experience_claims_from_description(desc) if desc else []
+        has_negative_claim = any(
+            claim_min > MAX_ALLOWED_EXPERIENCE_YEARS or claim_max > MAX_ALLOWED_EXPERIENCE_YEARS
+            for claim_min, claim_max in claims
+        )
+
+        if has_negative_claim:
+            # The JD explicitly asks for more than the fresher ceiling.
+            exp = "Not specified"
+            experience_source = "job_description_conflict"
+        elif exp_match:
             exp = f"{exp_match.group(1)}-{exp_match.group(2)} Yrs"
+            experience_source = "job_description"
+        elif claims:
+            # Positive fresher/0-1 evidence in the JD.
+            exp = "0-1 Yrs (JD Verified)"
+            experience_source = "job_description"
         elif any(w in (title + " " + desc).lower() for w in ["fresher", "fresh graduate", "campus hiring", "2024 passout", "2025 passout", "2026 passout"]):
             exp = "0-1 Yrs (Fresher)"
+            experience_source = "job_description"
         elif any(w in title.lower() for w in ["junior", "trainee", "associate software engineer", "associate engineer", "associate developer", "associate analyst", "entry level", "entry-level", "intern"]):
             exp = "0-1 Yrs (Junior / Trainee)"
+            experience_source = "title_inference"
         else:
-            exp = "Not specified"
-            
+            # LinkedIn's own entry-level filter (f_E=2) is platform-level evidence.
+            # If a substantial JD exists and does not contradict it, infer 0-1
+            # instead of rejecting the job for a missing search-card field.
+            job_level = _text(job.get("job_level")).lower()
+            has_role_context = bool(re.search(
+                r"\b(?:responsibilit(?:y|ies)|requirements?|qualifications?|skills?|"
+                r"what you(?:'|’)ll do|who you are|about the role|job description|duties)\b",
+                desc,
+                re.I,
+            ))
+            if job_level == "entry_level" and len(desc) >= 200 and has_role_context:
+                exp = "0-1 Yrs (Entry-Level Inferred)"
+                experience_source = "platform_entry_level"
+            else:
+                exp = "Not specified"
+                experience_source = "unknown"
+
     job["experience_range"] = str(exp).strip()
+    job["experience_source"] = experience_source
+    job["verification_status"] = (
+        "verified" if experience_source in {"board", "job_description"}
+        else "inferred" if experience_source in {"title_inference", "platform_entry_level"}
+        else "unverified"
+    )
     full_text = f"{title}\n{desc}"
     passouts = re.findall(r"\b(202[456]|2[456])\s*(?:passouts?|batch|graduates?)\b", full_text, re.I)
     job["eligible_passout_years"] = ", ".join(sorted({f"20{p[-2:]}" for p in passouts}))
@@ -578,7 +695,7 @@ def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
     within_48h, date_reason = is_within_hours(date_posted, MAX_HOURS_OLD)
     fresher_ok, exp_reason = is_fresher_job(title, experience, desc, level)
     legit_ok, legit_reason = is_legitimate_company(company, title, desc)
-    loc_ok, loc_reason = is_valid_location(location)
+    loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
 
     # Resolve apply URL
     apply_url = resolve_apply_url(job)

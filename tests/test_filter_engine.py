@@ -24,6 +24,7 @@ from filter_engine import (
     is_fresher_job,
     is_legitimate_company,
     is_valid_location,
+    normalize_location_for_search,
     resolve_apply_url,
     categorize_role,
     evaluate_job,
@@ -67,6 +68,26 @@ def test_experience_filtering():
     assert is_fresher_job("Frontend Developer", None, "3-7 years experience required")[0] is False
     # 5. Synechron 7-10 years
     assert is_fresher_job("Full Stack Developer", None, "7-10 years of experience in Python/Django")[0] is False
+    # 6. Accenture-style JD with the label and value on separate lines:
+    #    "Years of Experience:\n5 to 8 years"
+    assert is_fresher_job(
+        "Business Analyst", None,
+        "Qualifications:\nAny Graduation\nYears of Experience:\n5 to 8 years\nAbout us",
+    )[0] is False
+    assert is_fresher_job(
+        "Business Analyst", None,
+        "Experience\n2-4 years\nSkills: SQL, Excel",
+    )[0] is False
+    # Unit omitted on the value line
+    assert is_fresher_job(
+        "Business Analyst", None,
+        "Experience: 5 - 8\nLocation: Mumbai",
+    )[0] is False
+    # A genuine fresher range split across lines still passes
+    assert is_fresher_job(
+        "Business Analyst", None,
+        "Years of Experience:\n0 to 1 year\nRequirements: SQL, Excel",
+    )[0] is True
     print(" [OK] Experience filtering tests passed")
 
 
@@ -103,6 +124,10 @@ def test_company_blacklist():
     assert is_legitimate_company("Infosys")[0] is True
     assert is_legitimate_company("Accenture India")[0] is True
     assert is_legitimate_company("Bristol Myers Squibb", "Analyst – Statutory Reporting")[0] is True
+    # Training-staff titles must be rejected, but only as whole words.
+    assert is_legitimate_company("Benzene Corporation", "Data Analytics Faculty")[0] is False
+    assert is_legitimate_company("Acme", "Python Trainer")[0] is False
+    assert is_legitimate_company("Acme", "Spoken English Tutor")[0] is False
     print(" [OK] Company blacklist tests passed")
 
 
@@ -142,11 +167,22 @@ def test_location_validation():
     assert is_valid_location("Remote, India")[0] is True
     assert is_valid_location("Work from home")[0] is True
 
+    # Indeed often returns only the state. Use the city that was searched.
+    assert is_valid_location("MH, India", search_city="Mumbai")[0] is True
+    assert is_valid_location("Maharashtra, India", search_city="Mumbai")[0] is True
+    assert is_valid_location("TS, India", search_city="Hyderabad")[0] is True
+    assert is_valid_location("MH, India")[0] is False  # ambiguous without search city
+    assert normalize_location_for_search("MH, India", "Mumbai") == "Mumbai, Maharashtra, India"
+    assert normalize_location_for_search("TS, India", "Hyderabad") == "Hyderabad, Telangana, India"
+    assert normalize_location_for_search("Pune, India", "Mumbai") == "Pune, India"
+
     # Invalid targets (Noida, Pune, Bangalore, etc. without Mumbai/Hyd)
     assert is_valid_location("Noida, India")[0] is False
     assert is_valid_location("Pune, India")[0] is False
     assert is_valid_location("Bengaluru, India")[0] is False
     assert is_valid_location("Delhi, India")[0] is False
+    # "ts" must match as a token, not as a substring of another word.
+    assert is_valid_location("Consultants, India")[0] is False
     print(" [OK] Location validation tests passed")
 
 
@@ -297,6 +333,68 @@ def test_user_reported_regression_cases():
     print(" [OK] User reported regression cases passed")
 
 
+def test_linkedin_missing_experience_field_is_not_automatic_rejection():
+    """
+    LinkedIn search cards do not expose an experience range. A genuine entry-level
+    card with a real JD and no contrary experience requirement must not be rejected
+    just because the field is missing.
+    """
+    long_jd = (
+        "About the role\n"
+        "Responsibilities: Build dashboards, write SQL queries, analyse business data, "
+        "prepare weekly reports, and support the analytics team with day-to-day reporting.\n"
+        "Requirements: Strong analytical skills, Excel, SQL, attention to detail, and "
+        "good communication. You will work with senior analysts and business stakeholders.\n"
+        "Qualifications: Any graduate degree. Skills: SQL, Excel, PowerPoint, data analysis."
+    )
+
+    entry_level_job = {
+        "title": "Business Analyst",
+        "company": "Acme Analytics",
+        "location": "Mumbai, India",
+        "date_posted": datetime.now() - timedelta(hours=3),
+        "experience_range": "Not specified",
+        "site": "linkedin",
+        "job_level": "entry_level",
+        "description": long_jd,
+        "job_url": "https://www.linkedin.com/jobs/view/1234567890",
+    }
+    resolved = evaluate_job(dict(entry_level_job))
+    assert resolved["is_valid_fresher_job"] is True
+    assert resolved["experience_source"] == "platform_entry_level"
+    assert resolved["verification_status"] == "inferred"
+
+    # An explicit requirement above the ceiling still wins over the platform tag.
+    experienced_job = dict(entry_level_job)
+    experienced_job["description"] = (
+        "Responsibilities: Build dashboards and reports.\n"
+        "Requirements: 3+ years of experience in business analysis is required. "
+        "Skills: SQL, Excel, Tableau, stakeholder management."
+    )
+    rejected = evaluate_job(experienced_job)
+    assert rejected["is_valid_fresher_job"] is False
+    assert "Description requires at least 3" in rejected["rejection_reason"]
+
+    # No JD and no structured field = still unverifiable, not silently accepted.
+    bare_job = dict(entry_level_job)
+    bare_job["description"] = None
+    unverified = evaluate_job(bare_job)
+    assert unverified["is_valid_fresher_job"] is False
+
+    # A real fresher statement in the JD is accepted even without a board field.
+    fresher_job = dict(entry_level_job)
+    fresher_job["job_level"] = None
+    fresher_job["description"] = (
+        "Responsibilities: Build dashboards and reports.\n"
+        "Requirements: We welcome freshers to apply. No prior experience required. "
+        "Skills: SQL, Excel, communication."
+    )
+    fresher = evaluate_job(fresher_job)
+    assert fresher["is_valid_fresher_job"] is True
+    assert fresher["experience_source"] == "job_description"
+    print(" [OK] LinkedIn entry-level/JD experience evidence tests passed")
+
+
 class TestFilterEngineSuite(unittest.TestCase):
     """Unittest test runner adapter."""
 
@@ -327,6 +425,9 @@ class TestFilterEngineSuite(unittest.TestCase):
     def test_evaluation(self):
         test_full_pipeline_evaluation()
 
+    def test_linkedin_evidence(self):
+        test_linkedin_missing_experience_field_is_not_automatic_rejection()
+
 
 if __name__ == "__main__":
     print("\nRunning Fresher Job Scraper Test Suite (tests/)...")
@@ -339,4 +440,5 @@ if __name__ == "__main__":
     test_apply_url_validation()
     test_full_pipeline_evaluation()
     test_user_reported_regression_cases()
+    test_linkedin_missing_experience_field_is_not_automatic_rejection()
     print("\nALL FILTER TESTS PASSED SUCCESSFULLY!\n")

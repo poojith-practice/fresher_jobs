@@ -132,6 +132,7 @@ def main():
 
     valid_jobs = results["valid_jobs"]
     rejected_jobs = results["rejected_jobs"]
+    review_jobs = results.get("review_jobs", [])
     stats = results["stats"]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -147,6 +148,14 @@ def main():
 
     print(f"\n[*] History Cache: {len(new_jobs)} brand new jobs, {already_seen_count} already seen in prior runs.")
 
+    # Jobs with no usable experience evidence are kept for manual review,
+    # not silently thrown away as if they were experienced roles.
+    review_jobs_json = os.path.join(output_dir, "review_jobs_latest.json")
+    with open(review_jobs_json, "w", encoding="utf-8") as f:
+        json.dump(review_jobs, f, indent=2, default=str)
+    if review_jobs:
+        print(f"[*] {len(review_jobs)} jobs need manual review (missing experience evidence) -> {review_jobs_json}")
+
     hr_leads = []
 
     # 2. Save Valid Fresher Jobs to CSV and JSON
@@ -156,7 +165,9 @@ def main():
         # Reorder columns for clean reading
         priority_cols = [
             "site", "tech_category", "title", "company", "location",
-            "date_posted", "experience_range", "min_amount", "max_amount",
+            "date_posted", "experience_range", "experience_source", "verification_status",
+            "llm_verified", "llm_eligible", "llm_experience_detected",
+            "min_amount", "max_amount",
             "eligible_passout_years", "required_skills", "prior_experience_required", "job_requirement",
             "job_url_direct", "job_url", "emails", "quality_score"
         ]
@@ -258,7 +269,10 @@ def main():
     print(f" Total Raw Listings:      {stats['total_raw_scraped']}")
     print(f" Unique Jobs Deduplicated: {stats['total_unique_jobs']}")
     print(f" ✅ Verified Fresher Jobs: {stats['valid_fresher_jobs']}")
+    print(f" ⚠️  Needs Manual Review:  {stats.get('review_jobs_count', 0)}")
     print(f" ❌ Rejected (Filtered):  {stats['rejected_jobs_count']}")
+    if stats.get("inferred_experience_count"):
+        print(f" ℹ️  Experience inferred from platform/JD context: {stats['inferred_experience_count']}")
 
     print("\n Breakdown by Platform:")
     for site in sorted(

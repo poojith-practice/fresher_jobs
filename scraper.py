@@ -36,12 +36,15 @@ from filter_engine import (
     is_within_hours,
     is_legitimate_company,
     is_valid_location,
-    categorize_role,
+    normalize_location_for_search,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("FresherJobScraper")
 _LINKEDIN_LOCK = RLock()
+# Cache guest-endpoint descriptions for the current process so a rate-limited
+# or repeated card does not cost another HTTP request during the same run.
+_LINKEDIN_DESCRIPTION_CACHE: Dict[str, str] = {}
 
 
 class EntryLevelNaukri(Naukri):
@@ -121,6 +124,11 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
         return
 
     jid = jid_match.group(1)
+    cached = _LINKEDIN_DESCRIPTION_CACHE.get(jid)
+    if cached:
+        raw_job["description"] = cached
+        return
+
     url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{jid}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -140,7 +148,9 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
             soup = BeautifulSoup(resp.text, "html.parser")
             desc_div = soup.find("div", class_="show-more-less-html__markup")
             desc_text = desc_div.get_text("\n").strip() if desc_div else soup.get_text("\n").strip()
-            raw_job["description"] = desc_text
+            if desc_text:
+                _LINKEDIN_DESCRIPTION_CACHE[jid] = desc_text
+                raw_job["description"] = desc_text
         elif resp.status_code == 429:
             logger.warning("LinkedIn guest endpoint rate-limited (HTTP 429) for job %s", jid)
     except Exception as exc:
@@ -234,6 +244,12 @@ def scrape_fresher_jobs(
     target_sites = sites or TARGET_SITES
     proxies = proxies if proxies is not None else (JOBSPY_PROXIES or None)
 
+    # The freshness gate lives in filter_engine and defaults to config.
+    # Align it with the window this run actually requested so `--hours` means
+    # the same thing during scraping and during filtering.
+    import filter_engine as _filter_engine
+    _filter_engine.MAX_HOURS_OLD = hours_old
+
     all_raw_jobs: List[Dict[str, Any]] = []
     seen_urls = set()
     seen_composite_keys = set()
@@ -266,6 +282,11 @@ def scrape_fresher_jobs(
             results_wanted=results_per_query,
             proxies=proxies,
         )
+        if not df.empty:
+            # Preserve the query context: it is needed when a board returns a
+            # state ("MH, India") instead of a city, and for audit/debugging.
+            df["search_city"] = loc
+            df["search_query"] = search_query
         time.sleep(QUERY_DELAY_SECONDS)
         return df
 
@@ -283,6 +304,7 @@ def scrape_fresher_jobs(
     # Process and filter each job
     valid_jobs: List[Dict[str, Any]] = []
     rejected_jobs: List[Dict[str, Any]] = []
+    review_jobs: List[Dict[str, Any]] = []
 
     li_session = None
     try:
@@ -293,6 +315,16 @@ def scrape_fresher_jobs(
 
     for raw_job in all_raw_jobs:
         source = clean_str(raw_job.get("site")) or "unknown"
+
+        # Normalize state-only board locations (Indeed: "MH, India" / "TS, India")
+        # using the city that produced this result. Keep the raw value for audit.
+        location_raw = safe_str(raw_job.get("location"))
+        normalized_location = normalize_location_for_search(
+            location_raw, raw_job.get("search_city")
+        )
+        if normalized_location and normalized_location != location_raw:
+            raw_job["location_raw"] = location_raw
+            raw_job["location"] = normalized_location
 
         # Normalize URL fields to eliminate pandas NaN truthiness traps downstream
         direct_url = safe_str(raw_job.get("job_url_direct"))
@@ -320,65 +352,114 @@ def scrape_fresher_jobs(
             continue
         seen_composite_keys.add(comp_key)
 
-        # 3. Hydrate description for candidate LinkedIn jobs that pass preliminary triage
-        if source == "linkedin" and not safe_str(raw_job.get("description")):
+        # 3. Hydrate description for candidate LinkedIn jobs that pass preliminary triage.
+        # A short/empty description is exactly where LinkedIn hides the experience
+        # requirement, so do not require a role-category match before hydrating.
+        if source == "linkedin" and len(safe_str(raw_job.get("description"))) < 150:
             title_clean = safe_str(raw_job.get("title"))
             company_clean = safe_str(raw_job.get("company"))
             loc_clean = safe_str(raw_job.get("location"))
             within_h, _ = is_within_hours(raw_job.get("date_posted"), hours_old)
             legit, _ = is_legitimate_company(company_clean, title_clean)
-            loc_ok, _ = is_valid_location(loc_clean)
-            cat = categorize_role(title_clean)
-            if within_h and legit and loc_ok and cat:
+            loc_ok, _ = is_valid_location(loc_clean, search_city=raw_job.get("search_city"))
+            if within_h and legit and loc_ok:
                 hydrate_linkedin_description(raw_job, session=li_session)
                 time.sleep(0.5)
 
         # 4. Evaluate criteria (freshness, fresher experience, anti-scam blacklist)
         evaluated = evaluate_job(raw_job)
 
+        # 4a. Second chance for a missing search-card experience field.
+        # A missing field is not proof that the job requires experience. If the
+        # only blocker is experience, fetch the full JD (LinkedIn) and re-evaluate
+        # so the description / platform entry-level signal can decide.
+        def _only_missing_experience(job: Dict[str, Any]) -> bool:
+            missing_reasons = {
+                "Experience requirement missing; cannot verify fresher limit",
+                "Experience could not be verified as strict 0-1 years",
+                "Experience is unspecified/unverified; cannot guarantee fresher limit",
+            }
+            reasons = [
+                part.strip()
+                for part in str(job.get("rejection_reason", "")).split("|")
+                if part.strip()
+            ]
+            return bool(reasons) and all(reason in missing_reasons for reason in reasons)
+
+        if (
+            not evaluated["is_valid_fresher_job"]
+            and source in {"linkedin", "indeed"}
+            and _only_missing_experience(evaluated)
+        ):
+            if source == "linkedin" and len(safe_str(evaluated.get("description"))) < 150:
+                hydrate_linkedin_description(evaluated, session=li_session)
+                time.sleep(0.5)
+                evaluated = evaluate_job(evaluated)
+
+            if not evaluated["is_valid_fresher_job"] and _only_missing_experience(evaluated):
+                # Do not label an evidence gap as an experienced candidate.
+                # Keep it visible for manual review instead of auto-rejecting it.
+                evaluated["needs_review"] = True
+                evaluated["review_reason"] = (
+                    "No experience evidence in the search card or job description; "
+                    "kept for manual review instead of automatic rejection"
+                )
+
         if evaluated["is_valid_fresher_job"]:
-            # 5. Final LLM Gatekeeper & Skills Curator
+            # 5. Final LLM Gatekeeper & Skills Curator.
+            # HARD GATE: only a job the LLM explicitly approves may reach
+            # valid_jobs and the live Google Sheet. Anything we cannot verify
+            # goes to manual review instead of being trusted by default.
             try:
                 from llm_verifier import hydrate_job_description, verify_fresher_and_curate_skills, extract_fallback_skills
                 desc = hydrate_job_description(evaluated)
-                if desc:
-                    llm_eval = verify_fresher_and_curate_skills(
-                        description=desc,
-                        title=str(evaluated.get("title", "")),
-                        company=str(evaluated.get("company", ""))
+                if not desc:
+                    evaluated["needs_review"] = True
+                    evaluated["review_reason"] = (
+                        "Description unavailable; cannot run the LLM fresher gate"
                     )
-                    if not llm_eval.get("is_fresher_eligible", True):
-                        evaluated["is_valid_fresher_job"] = False
-                        evaluated["rejection_reason"] = f"LLM Gatekeeper: {llm_eval.get('rejection_reason', 'Requires prior experience')}"
-                        rejected_jobs.append(evaluated)
-                        continue
+                    review_jobs.append(evaluated)
+                    continue
 
-                    skills = str(llm_eval.get("curated_skills") or "").strip()
-                    if not skills:
-                        skills = extract_fallback_skills(desc, title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
-                    evaluated["skills_requirements"] = skills
-                else:
-                    # Description missing:
-                    # Cannot verify experience requirements with LLM.
-                    # Only accept if title is an explicit, unambiguous fresher title (e.g. Fresher, Intern, Trainee).
-                    title_lower = str(evaluated.get("title", "")).lower()
-                    explicit_fresher_markers = ["fresher", "intern", "trainee", "graduate trainee", "campus", "0-1 year", "0-1 yr"]
-                    if not any(m in title_lower for m in explicit_fresher_markers):
-                        evaluated["is_valid_fresher_job"] = False
-                        evaluated["rejection_reason"] = "Description unavailable to verify experience requirements"
-                        rejected_jobs.append(evaluated)
-                        continue
+                llm_eval = verify_fresher_and_curate_skills(
+                    description=desc,
+                    title=str(evaluated.get("title", "")),
+                    company=str(evaluated.get("company", ""))
+                )
+                llm_verified = bool(llm_eval.get("llm_verified", False))
+                evaluated["llm_verified"] = llm_verified
+                evaluated["llm_eligible"] = bool(llm_eval.get("is_fresher_eligible", False))
+                evaluated["llm_experience_detected"] = str(
+                    llm_eval.get("experience_detected") or ""
+                )
 
-                    evaluated["skills_requirements"] = extract_fallback_skills("", title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
+                if not llm_eval.get("is_fresher_eligible", False):
+                    if llm_verified:
+                        evaluated["is_valid_fresher_job"] = False
+                        evaluated["rejection_reason"] = (
+                            "LLM Gatekeeper: "
+                            f"{llm_eval.get('rejection_reason') or 'Requires prior experience'}"
+                        )
+                        rejected_jobs.append(evaluated)
+                    else:
+                        evaluated["needs_review"] = True
+                        evaluated["review_reason"] = (
+                            "LLM gate unavailable: "
+                            f"{llm_eval.get('rejection_reason') or 'verification did not complete'}"
+                        )
+                        review_jobs.append(evaluated)
+                    continue
+
+                skills = str(llm_eval.get("curated_skills") or "").strip()
+                if not skills:
+                    skills = extract_fallback_skills(desc, title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
+                evaluated["skills_requirements"] = skills
             except Exception as e:
                 logger.warning("LLM verification step encountered error: %s", e)
-                title_lower = str(evaluated.get("title", "")).lower()
-                if not any(m in title_lower for m in ["fresher", "intern", "trainee"]):
-                    evaluated["is_valid_fresher_job"] = False
-                    evaluated["rejection_reason"] = f"LLM gate error: {e}"
-                    rejected_jobs.append(evaluated)
-                    continue
-                evaluated["skills_requirements"] = extract_fallback_skills("", title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
+                evaluated["needs_review"] = True
+                evaluated["review_reason"] = f"LLM gate unavailable: {e}"
+                review_jobs.append(evaluated)
+                continue
 
             # Final safety check: NEVER allow a job into valid_jobs without skills_requirements
             if not str(evaluated.get("skills_requirements") or "").strip():
@@ -388,6 +469,8 @@ def scrape_fresher_jobs(
                 continue
 
             valid_jobs.append(evaluated)
+        elif evaluated.get("needs_review"):
+            review_jobs.append(evaluated)
         else:
             rejected_jobs.append(evaluated)
 
@@ -398,9 +481,14 @@ def scrape_fresher_jobs(
         "duration_seconds": round(elapsed, 2),
         "total_queries_executed": query_count,
         "total_raw_scraped": total_scraped,
-        "total_unique_jobs": len(valid_jobs) + len(rejected_jobs),
+        "total_unique_jobs": len(valid_jobs) + len(rejected_jobs) + len(review_jobs),
         "valid_fresher_jobs": len(valid_jobs),
         "rejected_jobs_count": len(rejected_jobs),
+        "review_jobs_count": len(review_jobs),
+        "inferred_experience_count": sum(
+            1 for job in valid_jobs
+            if job.get("experience_source") in {"title_inference", "platform_entry_level"}
+        ),
         "by_site": {},
         "by_category": {},
         "by_location": {},
@@ -426,5 +514,6 @@ def scrape_fresher_jobs(
     return {
         "valid_jobs": valid_jobs,
         "rejected_jobs": rejected_jobs,
+        "review_jobs": review_jobs,
         "stats": stats,
     }

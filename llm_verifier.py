@@ -233,22 +233,16 @@ def extract_requirements_and_skills_context(description: str, max_chars: int = 3
     return extracted_text[:max_chars].strip()
 
 
-SYSTEM_GATEKEEPER_PROMPT = """You are an expert technical recruitment gatekeeper for FRESHER job roles (strictly 0 to 1 year experience, zero prior work experience required).
+SYSTEM_GATEKEEPER_PROMPT = """Read the job description and decide whether this job is for a fresher (0-1 years, no prior professional experience) or whether it requires prior experience.
 
-Rules:
-1. "is_fresher_eligible":
-   - Set to TRUE if the role accepts freshers (0 prior experience), fresh graduates, trainees, interns, or 0-1 years experience, OR if NO prior professional work experience requirement is stated in the description.
-   - Set to FALSE if the description requires prior professional experience beyond freshers (e.g., "1+ year", "minimum 1-2 years", "2+ years", "3-5 years", "prior work experience in production environment required").
-2. "curated_skills":
-   - Extract a clean, concise, comma-separated list of ONLY concrete technical skills, tools, programming languages, and functional domain competencies (e.g., "Python, SQL, Tableau, Advanced Excel, Data Modeling").
-   - Strictly omit buzzwords like "good communication", "team player", "proactive", "motivated", "detail-oriented".
+Requirements like specialist tools (SAP, Salesforce, Oracle, Workday), "proficiency in ...", "experience in/with ...", senior scope, or owning client work mean prior experience. Freshers, 0-1 years, fresh graduate, trainee, or "no prior experience required" mean eligible. If the description lists no requirements or qualifications at all (only company boilerplate or "as per JD"), or is unclear, return false.
 
-Respond ONLY with a valid JSON object matching:
+Return only this JSON:
 {
   "is_fresher_eligible": true or false,
-  "experience_detected": "string summary",
-  "rejection_reason": "string or null",
-  "curated_skills": "Skill 1, Skill 2, Skill 3"
+  "experience_detected": "decisive evidence from the description",
+  "rejection_reason": "short reason, or null",
+  "curated_skills": "concrete tools/skills only, comma separated"
 }
 """
 
@@ -312,6 +306,21 @@ def extract_fallback_skills(text: str, title: str = "", role: str = "") -> str:
         return "Analytical Problem Solving, Microsoft Excel, Data Validation, Reporting, Process Documentation"
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Robustly interpret LLM booleans (true/false, "true"/"false", 1/0)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "eligible"}:
+            return True
+        if normalized in {"false", "no", "0", "ineligible", "not eligible"}:
+            return False
+    return default
+
+
 def verify_fresher_and_curate_skills(
     description: str,
     title: str = "",
@@ -321,24 +330,30 @@ def verify_fresher_and_curate_skills(
     """
     Evaluates a job description with LLM to strictly ensure fresher eligibility
     and curate a clean list of required skills.
+
+    Fails CLOSED: if the description is too thin, no LLM is configured, the call
+    fails, or the response cannot be parsed, the job is NOT treated as verified.
+    Callers must route `llm_verified=False` jobs to manual review rather than to
+    the live Google Sheet.
     """
     context = extract_requirements_and_skills_context(description)
     if not context or len(context) < 80:
-        # Insufficient text to run deep LLM analysis; rely on rule-based defaults
         return {
-            "is_fresher_eligible": True,
-            "experience_detected": "Unspecified in text",
-            "rejection_reason": None,
+            "is_fresher_eligible": False,
+            "llm_verified": False,
+            "experience_detected": "Insufficient description text",
+            "rejection_reason": "Description too short to verify fresher eligibility",
             "curated_skills": extract_fallback_skills(description, title=title),
         }
 
     active_llm = llm or get_llm()
     if active_llm is None:
-        logger.warning("No LLM available for fresher verification; skipping LLM gate.")
+        logger.warning("No LLM available for fresher verification; failing closed.")
         return {
-            "is_fresher_eligible": True,
+            "is_fresher_eligible": False,
+            "llm_verified": False,
             "experience_detected": "LLM not configured",
-            "rejection_reason": None,
+            "rejection_reason": "LLM verification unavailable (no API keys configured)",
             "curated_skills": extract_fallback_skills(context, title=title),
         }
 
@@ -356,8 +371,8 @@ def verify_fresher_and_curate_skills(
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
-            is_eligible = bool(data.get("is_fresher_eligible", True))
-            
+            is_eligible = _as_bool(data.get("is_fresher_eligible"), default=False)
+
             skills_val = data.get("curated_skills", "")
             if isinstance(skills_val, list):
                 skills = ", ".join(str(s).strip() for s in skills_val if str(s).strip())
@@ -365,7 +380,7 @@ def verify_fresher_and_curate_skills(
                 skills = ", ".join(f"{k}: {v}" for k, v in skills_val.items())
             else:
                 skills = str(skills_val or "").strip()
-            
+
             skills = re.sub(r"^[*\-•\s]+", "", skills)
             skills = re.sub(r"\n+[*\-•\s]*", ", ", skills)
             skills = re.sub(r",\s*,+", ", ", skills).strip(" ,")
@@ -378,6 +393,7 @@ def verify_fresher_and_curate_skills(
 
             return {
                 "is_fresher_eligible": is_eligible,
+                "llm_verified": True,
                 "experience_detected": exp_det,
                 "rejection_reason": reason if not is_eligible else None,
                 "curated_skills": skills,
@@ -386,9 +402,10 @@ def verify_fresher_and_curate_skills(
         logger.error("LLM verification call failed: %s", exc)
 
     return {
-        "is_fresher_eligible": True,
-        "experience_detected": "Evaluation exception",
-        "rejection_reason": None,
+        "is_fresher_eligible": False,
+        "llm_verified": False,
+        "experience_detected": "Evaluation failed",
+        "rejection_reason": "LLM verification failed; job not verified",
         "curated_skills": extract_fallback_skills(context, title=title),
     }
 

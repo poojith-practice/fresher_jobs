@@ -65,6 +65,103 @@ def test_verify_fresher_mock_fail_experienced():
     assert "3+ years" in res["rejection_reason"]
 
 
+LONG_FRESHER_JD = (
+    "Responsibilities: Build dashboards and reports. Requirements: Freshers welcome. "
+    "0-1 years experience. Skills: SQL, Excel, Power BI, Python, data analysis."
+)
+
+LONG_SPECIALIST_JD = (
+    "Requirements: Proficiency in SAP Analytics Cloud (SAC), with additional knowledge of SAP BW. "
+    "Experience in developing complex dashboards and reports. Experience in financial controlling "
+    "is a plus. Strong collaboration skills, with experience working in cross-functional teams."
+)
+
+
+def test_gate_fails_closed_without_llm(monkeypatch):
+    import llm_verifier
+
+    monkeypatch.setattr(llm_verifier, "get_llm", lambda: None)
+    res = llm_verifier.verify_fresher_and_curate_skills(
+        LONG_FRESHER_JD, title="Data Analyst", company="Acme"
+    )
+    assert res["is_fresher_eligible"] is False
+    assert res["llm_verified"] is False
+    assert "unavailable" in res["rejection_reason"].lower()
+
+
+def test_gate_fails_closed_when_llm_raises():
+    class ExplodingLLM:
+        def invoke(self, messages):
+            raise RuntimeError("network down")
+
+    res = verify_fresher_and_curate_skills(
+        LONG_FRESHER_JD, title="Data Analyst", company="Acme", llm=ExplodingLLM()
+    )
+    assert res["is_fresher_eligible"] is False
+    assert res["llm_verified"] is False
+
+
+def test_gate_fails_closed_on_short_description():
+    res = verify_fresher_and_curate_skills(
+        "Data analyst job.", title="Data Analyst", company="Acme",
+        llm=object(),
+    )
+    assert res["is_fresher_eligible"] is False
+    assert res["llm_verified"] is False
+
+
+def test_gate_parses_string_false_and_missing_key():
+    class StringFalseLLM:
+        def invoke(self, messages):
+            class Resp:
+                content = '{"is_fresher_eligible": "false", "rejection_reason": "Needs SAP experience", "curated_skills": "SAP SAC"}'
+            return Resp()
+
+    res = verify_fresher_and_curate_skills(
+        LONG_SPECIALIST_JD, title="Data Analyst - SAC", company="Lufthansa", llm=StringFalseLLM()
+    )
+    assert res["is_fresher_eligible"] is False
+    assert res["llm_verified"] is True
+    assert "SAP" in res["rejection_reason"]
+
+    class MissingKeyLLM:
+        def invoke(self, messages):
+            class Resp:
+                content = '{"curated_skills": "SQL, Excel"}'
+            return Resp()
+
+    res2 = verify_fresher_and_curate_skills(
+        LONG_FRESHER_JD, title="Data Analyst", company="Acme", llm=MissingKeyLLM()
+    )
+    assert res2["is_fresher_eligible"] is False  # missing verdict must not default to True
+    assert res2["llm_verified"] is True
+
+
+def test_sheet_gate_requires_llm_approval():
+    from google_sheets_sync import format_jobs_rows
+
+    base = {
+        "title": "Data Analyst",
+        "company": "Acme",
+        "location": "Mumbai, India",
+        "tech_category": "Data Analyst",
+        "date_posted": "2026-11-14",
+        "experience_range": "0-1 Yrs",
+        "min_amount": 300000,
+        "max_amount": 450000,
+        "apply_url": "https://example.com/job/1",
+        "site": "linkedin",
+        "skills_requirements": "SQL, Excel",
+    }
+    approved = dict(base, llm_verified=True, llm_eligible=True)
+    rule_only = dict(base, apply_url="https://example.com/job/2")
+    llm_rejected = dict(base, apply_url="https://example.com/job/3", llm_verified=True, llm_eligible=False)
+
+    rows = format_jobs_rows([approved, rule_only, llm_rejected])
+    assert len(rows) == 1
+    assert rows[0][8] == "https://example.com/job/1"
+
+
 def test_rotating_llm_key_failover(monkeypatch):
     from llm_verifier import RotatingLLM
     import os

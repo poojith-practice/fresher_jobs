@@ -66,6 +66,10 @@ def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
 
         # STRICT QUALITY GATEKEEPER:
         # Every single field must be present, valid, and complete before pushing to the Google Sheet.
+        # The LLM must also have explicitly approved the job: a rule-based pass is
+        # not sufficient evidence for the live sheet.
+        if not j.get("llm_verified") or not j.get("llm_eligible"):
+            continue
         if not title or not company or not location or not category:
             continue
         if not apply_url.startswith("http"):
