@@ -74,6 +74,8 @@ def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
             continue
         if not min_sal or not max_sal:
             continue
+        if not skills or len(skills.strip()) < 3:
+            continue
 
         rows.append([
             title, company, location, category, date_p, exp,

@@ -477,7 +477,7 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
             exp = f"{exp_match.group(1)}-{exp_match.group(2)} Yrs"
         elif any(w in (title + " " + desc).lower() for w in ["fresher", "fresh graduate", "campus hiring", "2024 passout", "2025 passout", "2026 passout"]):
             exp = "0-1 Yrs (Fresher)"
-        elif any(w in title.lower() for w in ["junior", "trainee", "associate", "entry level", "entry-level"]):
+        elif any(w in title.lower() for w in ["junior", "trainee", "associate software engineer", "associate engineer", "associate developer", "associate analyst", "entry level", "entry-level", "intern"]):
             exp = "0-1 Yrs (Junior / Trainee)"
         else:
             exp = "Not specified"

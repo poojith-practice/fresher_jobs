@@ -128,8 +128,14 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
     }
 
     try:
-        requester = session if session is not None else requests
-        resp = requester.get(url, headers=headers, timeout=6)
+        try:
+            from curl_cffi import requests as cffi_requests
+            s = cffi_requests.Session(impersonate="chrome")
+            resp = s.get(url, headers=headers, timeout=8)
+        except Exception:
+            requester = session if session is not None else requests
+            resp = requester.get(url, headers=headers, timeout=6)
+
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
             desc_div = soup.find("div", class_="show-more-less-html__markup")
@@ -333,7 +339,7 @@ def scrape_fresher_jobs(
         if evaluated["is_valid_fresher_job"]:
             # 5. Final LLM Gatekeeper & Skills Curator
             try:
-                from llm_verifier import hydrate_job_description, verify_fresher_and_curate_skills
+                from llm_verifier import hydrate_job_description, verify_fresher_and_curate_skills, extract_fallback_skills
                 desc = hydrate_job_description(evaluated)
                 if desc:
                     llm_eval = verify_fresher_and_curate_skills(
@@ -347,9 +353,39 @@ def scrape_fresher_jobs(
                         rejected_jobs.append(evaluated)
                         continue
 
-                    evaluated["skills_requirements"] = llm_eval.get("curated_skills", "")
+                    skills = str(llm_eval.get("curated_skills") or "").strip()
+                    if not skills:
+                        skills = extract_fallback_skills(desc, title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
+                    evaluated["skills_requirements"] = skills
+                else:
+                    # Description missing:
+                    # Cannot verify experience requirements with LLM.
+                    # Only accept if title is an explicit, unambiguous fresher title (e.g. Fresher, Intern, Trainee).
+                    title_lower = str(evaluated.get("title", "")).lower()
+                    explicit_fresher_markers = ["fresher", "intern", "trainee", "graduate trainee", "campus", "0-1 year", "0-1 yr"]
+                    if not any(m in title_lower for m in explicit_fresher_markers):
+                        evaluated["is_valid_fresher_job"] = False
+                        evaluated["rejection_reason"] = "Description unavailable to verify experience requirements"
+                        rejected_jobs.append(evaluated)
+                        continue
+
+                    evaluated["skills_requirements"] = extract_fallback_skills("", title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
             except Exception as e:
-                logger.warning("LLM verification step skipped due to error: %s", e)
+                logger.warning("LLM verification step encountered error: %s", e)
+                title_lower = str(evaluated.get("title", "")).lower()
+                if not any(m in title_lower for m in ["fresher", "intern", "trainee"]):
+                    evaluated["is_valid_fresher_job"] = False
+                    evaluated["rejection_reason"] = f"LLM gate error: {e}"
+                    rejected_jobs.append(evaluated)
+                    continue
+                evaluated["skills_requirements"] = extract_fallback_skills("", title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
+
+            # Final safety check: NEVER allow a job into valid_jobs without skills_requirements
+            if not str(evaluated.get("skills_requirements") or "").strip():
+                evaluated["is_valid_fresher_job"] = False
+                evaluated["rejection_reason"] = "Missing required skills/responsibilities"
+                rejected_jobs.append(evaluated)
+                continue
 
             valid_jobs.append(evaluated)
         else:

@@ -446,10 +446,19 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
 
         if li_id:
             try:
-                import requests
-                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
                 url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{li_id}"
-                res = requests.get(url, headers=headers, timeout=8)
+                try:
+                    from curl_cffi import requests as cffi_requests
+                    s = cffi_requests.Session(impersonate="chrome")
+                    res = s.get(url, headers=headers, timeout=8)
+                except Exception:
+                    import requests
+                    res = requests.get(url, headers=headers, timeout=6)
+
                 if res.status_code == 200:
                     soup = BeautifulSoup(res.text, "html.parser")
                     desc_div = soup.find("div", class_="show-more-less-html__markup")
