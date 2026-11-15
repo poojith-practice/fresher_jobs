@@ -486,4 +486,19 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
             except Exception as e:
                 logger.debug("LinkedIn hydration failed for %s: %s", li_id, e)
 
+    # 3. Foundit / Monster India Hydration
+    if site in {"monsterindia", "foundit"} or "foundit.in" in apply_url:
+        jid = job_id.replace("fi-", "").strip()
+        url_match = re.search(r"(\d{7,10})", apply_url)
+        target_id = jid if jid.isdigit() else (url_match.group(1) if url_match else "")
+        if target_id:
+            try:
+                from foundit_scraper import fetch_foundit_job_description
+                desc = fetch_foundit_job_description(target_id)
+                if desc:
+                    job["description"] = desc
+                    return desc
+            except Exception as e:
+                logger.debug("Foundit hydration failed for %s: %s", target_id, e)
+
     return existing_desc

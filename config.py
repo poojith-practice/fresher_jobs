@@ -16,11 +16,9 @@ from typing import List, Dict
 # Maximum age of jobs to keep in hours (20 = last 20 hours)
 MAX_HOURS_OLD: int = 20
 
-# Target job boards (all 100% free via JobSpy)
-# JobSpy 1.4.x supports these boards. Monster India / JobsAhead is not a
-# JobSpy adapter and is reported as unsupported instead of silently claimed.
-TARGET_SITES: List[str] = ["naukri", "indeed", "linkedin"]
-UNSUPPORTED_SITES: List[str] = ["monsterindia (JobsAhead)"]
+# Target job boards (all 100% free; Naukri, Indeed, LinkedIn via JobSpy; Monster India via Foundit API)
+TARGET_SITES: List[str] = ["naukri", "indeed", "linkedin", "monsterindia"]
+UNSUPPORTED_SITES: List[str] = []
 
 # Target locations (India)
 DEFAULT_LOCATIONS: List[str] = ["Mumbai", "Hyderabad"]

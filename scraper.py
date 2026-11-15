@@ -172,6 +172,17 @@ def run_scraping_query(
 
     def scrape_one_site(site: str) -> tuple[str, pd.DataFrame, Optional[str]]:
         try:
+            if site in {"monsterindia", "foundit", "monster"}:
+                from foundit_scraper import scrape_foundit_jobs
+                df = scrape_foundit_jobs(
+                    search_term=search_term,
+                    location=location,
+                    results_wanted=results_wanted,
+                    hours_old=hours_old,
+                    proxies=proxies,
+                )
+                return site, df, None
+
             # fetch_description=False delivers sub-second search responses across all boards.
             # Naukri includes title, company, location, experienceText, date, and apply URL.
             # Indeed includes title, company, location, full HTML description, date, and apply URL.
