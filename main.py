@@ -81,6 +81,11 @@ def parse_args():
         action="store_true",
         help="Quick run mode: scrapes 1 query per category with small limit for testing",
     )
+    parser.add_argument(
+        "--with-interview-docs",
+        action="store_true",
+        help="Generate student-friendly interview prep PDFs for verified fresher jobs",
+    )
     return parser.parse_args()
 
 
@@ -253,6 +258,20 @@ def main():
     sync_failed = synced is False
     if sync_failed:
         print("[!] Google Sheets sync did not complete; local exports are still available.")
+
+    # 2b. Optionally generate Interview Preparation PDFs for verified fresher jobs
+    if getattr(args, "with_interview_docs", False) and valid_jobs:
+        try:
+            from interview_prep.runner import run_interview_docs
+            print("\n[*] Generating Interview Prep Documents for verified fresher jobs...")
+            interview_dir = os.path.join(output_dir, "interview_docs")
+            prep_stats = run_interview_docs(valid_jobs, output_base_dir=interview_dir)
+            print(
+                f"[✓] Interview Prep: {prep_stats['generated']} generated, "
+                f"{prep_stats['cached']} cached, {prep_stats['failed']} failed."
+            )
+        except Exception as exc:
+            print(f"[!] Interview prep generation encountered an error: {exc}")
 
     # 2. Save Rejected Jobs Log (for transparency and audit)
     if rejected_jobs:

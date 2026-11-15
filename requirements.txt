@@ -23,5 +23,10 @@ langchain-core>=0.2.0
 curl-cffi>=0.7.0
 beautifulsoup4>=4.12.0
 
+# Interview Prep Document Generator (Minimal PDF & Web Question Sourcing)
+reportlab>=4.0.0
+ddgs>=9.0.0
+httpx>=0.25.0
+
 # PostgreSQL 16 Driver (Optional - SQLite fallback included)
 psycopg2-binary>=2.9.0

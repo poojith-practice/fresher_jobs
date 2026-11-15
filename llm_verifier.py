@@ -75,7 +75,7 @@ class RotatingLLM:
     def has_keys(self) -> bool:
         return bool(self.groq_keys or self.openrouter_keys)
 
-    def invoke(self, messages: Any) -> Any:
+    def invoke(self, messages: Any, max_tokens: Optional[int] = None) -> Any:
         from langchain_openai import ChatOpenAI
 
         # 1. Iterate through configured Groq keys
@@ -88,7 +88,7 @@ class RotatingLLM:
                     base_url="https://api.groq.com/openai/v1",
                     model=self.groq_model,
                     temperature=0.1,
-                    max_tokens=600,
+                    max_tokens=max_tokens or 600,
                 )
                 return client.invoke(messages)
             except Exception as exc:
@@ -120,7 +120,7 @@ class RotatingLLM:
                     base_url="https://openrouter.ai/api/v1",
                     model=self.openrouter_model,
                     temperature=0.1,
-                    max_tokens=500,
+                    max_tokens=max_tokens or 500,
                     default_headers={
                         "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
                         "X-Title": "Fresher Job Intelligence Scraper",
