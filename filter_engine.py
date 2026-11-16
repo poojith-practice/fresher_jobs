@@ -639,6 +639,7 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
             min_sal = int(float(lpa_match.group(1)) * 100000)
             max_sal = int(float(lpa_match.group(2)) * 100000)
             job["salary_source_type"] = "Extracted from JD"
+            has_valid_salary = True
         else:
             # Monthly stipend / salary: "₹25,000 - ₹35,000 / month"
             month_match = re.search(r"(?:₹|rs\.?)\s*(\d{2,3}(?:,\d{3})*)\s*(?:-|to)\s*(?:₹|rs\.?)?\s*(\d{2,3}(?:,\d{3})*)\s*(?:per\s*month|/month|pm)\b", desc, re.I)
@@ -648,27 +649,18 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
                 min_sal = m1
                 max_sal = m2
                 job["salary_source_type"] = "Extracted from Monthly JD"
+                has_valid_salary = True
             else:
-                # Role-specific Fresher Industry Benchmarks in India (Mumbai/Hyderabad)
-                BENCHMARKS = {
-                    "Data Analytics": (350000, 500000),
-                    "Business Analytics": (300000, 480000),
-                    "Analyst": (300000, 450000),
-                    "MIS Executive": (240000, 360000),
-                    "Web Development & Full Stack": (350000, 550000),
-                    "General Tech Fresher": (300000, 450000)
-                }
-                b_min, b_max = BENCHMARKS.get(cat, (300000, 450000))
-                min_sal = b_min
-                max_sal = b_max
-                job["salary_source_type"] = "Market Benchmark (Undisclosed)"
+                min_sal = "Not Mentioned"
+                max_sal = "Not Mentioned"
+                job["salary_source_type"] = "Not Mentioned"
 
     job["min_amount"] = min_sal
     job["max_amount"] = max_sal
     job["salary_display"] = (
         f"₹{int(float(min_sal)):,} - ₹{int(float(max_sal)):,}"
-        if has_valid_salary or (min_sal and max_sal)
-        else "Not Disclosed"
+        if has_valid_salary
+        else "Not Mentioned"
     )
 
     return job
@@ -732,7 +724,7 @@ def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
 
     # Compute a quality confidence score (0-100)
     score = 60
-    if job.get("min_amount") or job.get("max_amount"):
+    if job.get("min_amount") not in {None, "", "Not Mentioned"}:
         score += 15
     if has_valid_url:
         score += 10

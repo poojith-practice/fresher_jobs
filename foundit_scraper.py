@@ -142,9 +142,9 @@ def scrape_foundit_jobs(
             min_sal = item.get("minimumSalaryINRFilter") or item.get("minimumSalary")
             max_sal = item.get("maximumSalaryINRFilter") or item.get("maximumSalary")
             if not min_sal or min_sal == 0:
-                min_sal = 300000
+                min_sal = None
             if not max_sal or max_sal == 0:
-                max_sal = 500000
+                max_sal = None
 
             desc = f"Role: {title}\nCompany: {company}\nRequired Skills: {skills}\nLocations: {loc_str}"
 

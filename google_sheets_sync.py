@@ -56,8 +56,8 @@ def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
         category = str(cell(j.get("tech_category"))).strip()
         date_p = str(cell(j.get("date_posted"))).strip()
         exp = str(cell(j.get("experience_range"))).strip()
-        min_sal = cell(j.get("min_amount"))
-        max_sal = cell(j.get("max_amount"))
+        min_sal = cell(j.get("min_amount")) or "Not Mentioned"
+        max_sal = cell(j.get("max_amount")) or "Not Mentioned"
         apply_url = str(cell(j.get("apply_url") or j.get("job_url_direct") or j.get("job_url"))).strip()
         source = str(cell(j.get("site"))).upper()
         last_updated = datetime.now().isoformat(timespec="seconds")
