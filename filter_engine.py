@@ -66,12 +66,22 @@ def parse_date_posted(date_val: Any) -> Optional[datetime]:
         weeks = int(weeks_match.group(1))
         return now - timedelta(weeks=weeks)
 
-    # Standard ISO formats: YYYY-MM-DD
-    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(val_str[:10], fmt)
-        except (ValueError, IndexError):
-            pass
+    # Try full ISO format (preserves hours/minutes/seconds)
+    try:
+        dt = datetime.fromisoformat(val_str.replace("z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
+    except Exception:
+        pass
+
+    # Standard date formats: YYYY-MM-DD
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+        for sub in (val_str[:19], val_str[:10]):
+            try:
+                return datetime.strptime(sub, fmt)
+            except (ValueError, IndexError):
+                pass
 
     return None
 

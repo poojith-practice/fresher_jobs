@@ -224,14 +224,16 @@ def gather_question_context(
     fewer excerpts, never an exception.
     """
     company = clean_text(company, 100)
+    clean_company = re.sub(r"(?i)\b(pvt\.?|ltd\.?|private|limited|llc|inc\.?)\b", "", company).strip()
     role = clean_text(role, 100)
     skills = [clean_text(s, 60) for s in skills if clean_text(s, 60)][:3]
 
     queries: list[tuple[str, str]] = []
-    if company:
-        queries.append(("company", f'"{company}" interview questions'))
+    if clean_company:
+        queries.append(("company", f'"{clean_company}" interview questions'))
+        queries.append(("company", f'"{clean_company}" tech stack products architecture'))
         if role:
-            queries.append(("company", f'"{company}" "{role}" interview experience fresher'))
+            queries.append(("company", f'"{clean_company}" "{role}" interview experience fresher'))
     if role:
         queries.append(("role", f'"{role}" interview questions and answers for freshers'))
     for skill in skills:
