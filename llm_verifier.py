@@ -300,8 +300,10 @@ def extract_fallback_skills(text: str, title: str = "", role: str = "") -> str:
     t_lower = f"{title} {role}".lower()
     if "data" in t_lower:
         return "Python, SQL, Advanced Excel, Data Analysis, Power BI, Tableau"
-    elif "web" in t_lower or "developer" in t_lower or "frontend" in t_lower or "backend" in t_lower:
-        return "HTML, CSS, JavaScript, React, Node.js, Git, REST APIs"
+    elif any(k in t_lower for k in ["engineer", "sde", "software", "developer", "web", "frontend", "backend"]):
+        return "Core Java, Python, SQL, Data Structures & Algorithms, Git, Problem Solving"
+    elif any(k in t_lower for k in ["drive", "nqt", "off-campus", "campus"]):
+        return "Aptitude & Logical Reasoning, Analytical Problem Solving, Core Java/Python Basics, Communication Skills"
     elif "business" in t_lower:
         return "Requirements Gathering, BRD/FRD, Advanced Excel, Process Modeling, Agile, JIRA"
     elif "tax" in t_lower or "accounting" in t_lower or "finance" in t_lower:

@@ -133,18 +133,21 @@ def normalize_location_for_search(location: Optional[str], search_city: Optional
 def is_valid_location(
     location: Optional[str],
     search_city: Optional[str] = None,
+    is_drive: bool = False,
 ) -> Tuple[bool, str]:
     """
     Verifies that the job is located in one of the target metros (Mumbai or Hyderabad),
     their recognized metropolitan areas / tech corridors, or is explicitly Remote.
-    Rejects jobs exclusively in other cities (Noida, Pune, Gurgaon, Bangalore, Delhi, etc.).
-
-    `search_city` is used only when the board returns a state instead of a city
-    (for example Indeed's "MH, India" for a Mumbai search).
+    Rejects jobs exclusively in other cities (Noida, Pune, Gurgaon, Bangalore, Delhi, etc.)
+    unless it is an off-campus recruitment drive.
     """
     loc_clean = _text(location).lower()
     if not loc_clean:
         return False, "Empty location"
+
+    # National off-campus drives or Pan India locations
+    if is_drive or any(k in loc_clean for k in ["pan india", "all india", "anywhere in india", "multiple locations"]):
+        return True, f"Valid national / off-campus location: '{location}'"
 
     search_city_clean = _text(search_city).lower()
     state_only = re.fullmatch(r"(?:mh|maharashtra|ts|telangana)(?:,\s*india)?", loc_clean)
@@ -176,6 +179,10 @@ def is_valid_location(
 
     if is_mumbai or is_hyderabad or is_remote:
         return True, f"Valid target location: '{location}'"
+
+    # Off-campus drives across major Indian tech hubs
+    if is_drive and any(city in loc_clean for city in ["bangalore", "bengaluru", "chennai", "pune", "gurgaon", "gurugram", "noida", "delhi"]):
+        return True, f"Valid off-campus drive tech metro: '{location}'"
 
     # Other non-target cities that must be rejected if Mumbai/Hyderabad is not present
     disallowed_cities = [
@@ -410,7 +417,8 @@ def is_fresher_job(
         "campus recruitment", "no prior experience", "zero experience",
         "freshers can apply", "freshers welcome", "freshers eligible",
         "2024 passout", "2025 passout", "2026 passout",
-        "2024 batch", "2025 batch", "2026 batch", "recent graduate"
+        "2024 batch", "2025 batch", "2026 batch", "recent graduate",
+        "off-campus", "off campus", "campus drive", "nqt",
     ])
 
     # Strict fresher ceiling: 1.0 year max across all roles and titles
@@ -488,13 +496,48 @@ def is_legitimate_company(
     return True, "Legitimate employer"
 
 
+OFF_CAMPUS_PATTERNS = [
+    r"\bnational\s+qualifier\s+test\b",
+    r"\bqualifier\s+test\b",
+    r"\boff[\s-]?campus\b",
+    r"\bnqt\b",
+    r"\bnth\b",
+    r"\bhiring\s+challenge\b",
+    r"\bpooled\s+drive\b",
+    r"\bmega\s+(?:hiring\s+)?drive\b",
+    r"\bwalk[\s-]?in\s+drive\b",
+    r"\brecruitment\s+drive\b",
+    r"\bcampus\s+drive\b",
+]
+
+
+def is_off_campus_drive(title: Optional[str], description: Optional[str] = None) -> bool:
+    """Identifies generic or collective off-campus recruitment drives."""
+    text = f"{_text(title)} {_text(description)}".lower()
+    return any(re.search(pat, text, re.IGNORECASE) for pat in OFF_CAMPUS_PATTERNS)
+
+
 def categorize_role(title: Optional[str], description: Optional[str] = None) -> Optional[str]:
     """
-    Strictly maps the job title/description to one of the 5 target tracks requested.
-    Returns None if the job is not in the 5 requested positions.
+    Strictly maps the job title/description to one of the target tracks.
+    Returns None if the job is not in the requested positions.
     """
     title_clean = _text(title).lower()
     text = f"{title_clean} {_text(description)}".lower()
+
+    # Priority check: Off-campus collective recruitment drives
+    if is_off_campus_drive(title, description):
+        if "data" in title_clean and "analyst" in title_clean:
+            return "Data Analyst"
+        elif "business" in title_clean and "analyst" in title_clean:
+            return "Business Analyst"
+        elif any(k in title_clean for k in ["full stack", "fullstack", "software", "developer", "engineer", "sde", "java", "python"]):
+            return "Full Stack Developer"
+        elif any(k in title_clean for k in ["web", "frontend", "ui"]):
+            return "Web Developer"
+        elif "analyst" in title_clean:
+            return "Analyst"
+        return "Off-Campus Recruitment Drive"
 
     if "marketing" in title_clean and "analyst" in title_clean:
         return "Marketing Analyst"
@@ -690,14 +733,23 @@ def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
     desc = job.get("description")
     level = job.get("job_level")
 
+    is_drive = is_off_campus_drive(title, desc) or job.get("opportunity_type") == "OFF_CAMPUS_DRIVE"
+    if is_drive:
+        job["opportunity_type"] = "OFF_CAMPUS_DRIVE"
+
     # Run tests
     job = enrich_experience_and_salary(job)
     experience = job.get("experience_range")
 
     within_48h, date_reason = is_within_hours(date_posted, MAX_HOURS_OLD)
+    if is_drive and not within_48h:
+        if job.get("deadline_status", "OPEN") in {"OPEN", "UNKNOWN"}:
+            within_48h = True
+            date_reason = "Valid active recruitment drive deadline"
+
     fresher_ok, exp_reason = is_fresher_job(title, experience, desc, level)
     legit_ok, legit_reason = is_legitimate_company(company, title, desc)
-    loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
+    loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"), is_drive=is_drive)
 
     # Resolve apply URL
     apply_url = resolve_apply_url(job)
