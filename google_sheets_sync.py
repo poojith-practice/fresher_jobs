@@ -150,10 +150,10 @@ def merge_job_rows(
             str(row[2] or "").strip().casefold(),
         )
 
-    # Only preserve historical rows that pass the strict quality & completeness check
+    # Always preserve all existing historical rows on the sheet
     for source_row in existing_rows:
         row = normalized(source_row)
-        if not is_valid_sheet_row(row):
+        if not any(str(c).strip() for c in row):  # Skip completely empty blank rows
             continue
         job_key = key(row)
         if job_key in row_index_by_key:
