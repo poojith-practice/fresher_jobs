@@ -36,12 +36,12 @@ TECH_SKILL_CATALOG = {
     "Node.js": [r"\bnode(?:\.js)?\b"],
     "Angular": [r"\bangular(?:\.js)?\b"],
     "Vue.js": [r"\bvue(?:\.js)?\b"],
-    "Next.js": [r"\bnext(?:\.js)?\b"],
+    "Next.js": [r"\bnext\.js\b", r"\bnextjs\b"],
     "Django": [r"\bdjango\b"],
     "Flask": [r"\bflask\b"],
     "FastAPI": [r"\bfastapi\b"],
     "Spring Boot": [r"\bspring\s*boot\b", r"\bspring\s*framework\b"],
-    "Express.js": [r"\bexpress(?:\.js)?\b"],
+    "Express.js": [r"\bexpress\.js\b", r"\bexpressjs\b"],
     "HTML/CSS": [r"\bhtml5?\b", r"\bcss3?\b", r"\btailwind\b", r"\bbootstrap\b"],
 
     # Databases & Big Data

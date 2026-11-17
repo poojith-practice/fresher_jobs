@@ -9,6 +9,11 @@ EXCLUDE_EXPERIENCE_PATTERNS = [
     r"\bminimum\s+([2-9]|\d{2,})\s*(?:years?|yrs?)\b",                  # minimum 2 years
     r"\bat\s+least\s+([2-9]|\d{2,})\s*(?:years?|yrs?)\b",                # at least 2 years
     r"\b([2-9]|\d{2,})\+\s*(?:years?|yrs?)\s+of\s+experience\b",        # 2+ years of experience
+    r"\b1\+\s*(?:years?|yrs?)\s+of\s+(?:non[\s-]internship|professional|full[\s-]time|industry|relevant|software)\b", # 1+ years of non-internship/professional
+    r"\b1\+\s*(?:years?|yrs?)\s+(?:of\s+)?experience\b",                # 1+ years of experience
+    r"\bminimum\s+1\+?\s*(?:years?|yrs?)\s+of\s+(?:non[\s-]internship|professional|full[\s-]time|industry|relevant)\b",
+    r"\bat\s+least\s+1\+?\s*(?:years?|yrs?)\s+of\s+(?:non[\s-]internship|professional|full[\s-]time|industry|relevant)\b",
+    r"\bnon[\s-]internship\s+(?:professional\s+)?(?:software\s+development\s+)?experience\b", # non-internship experience
 ]
 
 FRESHER_POSITIVE_PATTERNS = [

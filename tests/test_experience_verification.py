@@ -42,3 +42,15 @@ def test_senior_role_without_experience_rejected_case_4():
     )
     assert ok is False
     assert any("Seniority conflict in title" in c for c in cont)
+
+
+def test_non_internship_experience_rejected():
+    # Tests that 1+ years of non-internship experience is strictly rejected
+    ok, summary, sup, cont = verify_experience(
+        title="Software Dev Engineer I FTC",
+        description="Basic Qualifications:\n- 1+ years of non-internship professional software development experience\n- Experience programming with at least one software programming language",
+    )
+    assert ok is False
+    assert "Commercial Experience Required" in summary
+    assert any("non-internship" in c.lower() for c in cont)
+
