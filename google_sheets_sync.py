@@ -61,7 +61,20 @@ def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
         apply_url = str(cell(j.get("apply_url") or j.get("job_url_direct") or j.get("job_url"))).strip()
         source = str(cell(j.get("site"))).upper()
         last_updated = datetime.now().isoformat(timespec="seconds")
-        skills = str(cell(j.get("skills_requirements") or j.get("required_skills") or j.get("job_requirement"))).strip()
+        # Extract clean, concise skills (prefer structured comma-separated skills, never raw paragraphs)
+        raw_skills = str(cell(j.get("skills") or j.get("curated_skills") or j.get("skills_requirements"))).strip()
+        if (
+            raw_skills
+            and raw_skills.lower() not in {"nan", "none", "null", ""}
+            and len(raw_skills) < 160
+            and not any(bad in raw_skills.lower() for bad in ["working hours", "leave policy", "probation", "cab facility", "shift 1", "shift 2", "pf & esic"])
+        ):
+            skills = raw_skills
+        else:
+            from llm_verifier import extract_fallback_skills
+            desc_text = str(j.get("description") or j.get("job_requirement") or "")
+            curated = extract_fallback_skills(desc_text, title=title, role=category)
+            skills = curated if curated and len(curated.strip()) >= 3 else "Analytical Skills, Problem Solving, Communication Skills"
         interview_doc = str(cell(j.get("interview_doc_url") or "")).strip()
 
         # STRICT QUALITY GATEKEEPER:
