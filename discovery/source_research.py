@@ -12,7 +12,10 @@ import sys
 import time
 from typing import Any, Dict, List
 from bs4 import BeautifulSoup
-from curl_cffi import requests as cffi_requests
+try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    import requests as cffi_requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("source_research")

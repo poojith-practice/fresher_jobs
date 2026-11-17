@@ -14,7 +14,10 @@ if str(LAB_ROOT) not in sys.path:
     sys.path.insert(0, str(LAB_ROOT))
 
 from typing import Dict, List
-from curl_cffi import requests
+try:
+    from curl_cffi import requests
+except ImportError:
+    import requests
 from config.sources import SOURCES_CONFIG
 
 

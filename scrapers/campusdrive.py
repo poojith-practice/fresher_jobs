@@ -72,12 +72,25 @@ def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
     if status != 200 or not body:
         return {"detail_status": outcome}
 
+    # Classify page type before extracting
+    from extraction.page_type_classifier import classify_page_type, PageType
+    page_type, reason = classify_page_type(url=detail_url, html_content=body)
+    if page_type not in (PageType.JOB_DETAIL, PageType.DRIVE_DETAIL):
+        logger.info("[campusdrive] Skipping non-job page %s: %s (%s)", detail_url, page_type.value, reason)
+        return {"detail_status": "REJECTED_PAGE_TYPE", "page_type": page_type.value, "reason": reason}
+
     soup = BeautifulSoup(body, "html.parser")
 
     # Clean boilerplate before extracting text
     for tag in soup(["nav", "header", "footer", "aside", "script", "style", "noscript"]):
         tag.decompose()
-    for cl in ["sidebar", "navigation", "related-posts", "widget", "footer", "menu"]:
+    for cl in [
+        "sidebar", "navigation", "related-posts", "widget", "footer", "menu",
+        "yarpp-related", "rp4wp-related-posts", "post-navigation", "nav-links",
+        "comments-area", "comment-respond", "sharedaddy", "sd-sharing",
+        "tagcloud", "tags-links", "widget-area", "wp-block-latest-posts",
+        "wp-block-columns", "entry-meta", "author-bio", "related-articles"
+    ]:
         for el in soup.find_all(class_=re.compile(cl, re.I)):
             el.decompose()
 
@@ -144,6 +157,29 @@ def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
         if matches:
             batches = sorted(list(set(int(b) for b in matches)))
 
+    # 2b. Extract Experience Requirement (Do not fabricate defaults)
+    exp_min = None
+    exp_max = None
+    exp_status = "NOT_SPECIFIED"
+    exp_m = re.search(r"(?:experience|work\s+experience|exp)\s*[:\-–—]?\s*([^\n<|]+?)(?:passing|academic|qualification|salary|skills|batch|$)", clean_text, re.I)
+    if exp_m:
+        exp_text = exp_m.group(1).lower().strip()
+        if "fresher" in exp_text or "0 year" in exp_text or "0-0" in exp_text or "0 to 1" in exp_text or "0-1" in exp_text:
+            exp_min = 0.0
+            exp_max = 1.0
+            exp_status = "FRESHER_ELIGIBLE"
+        elif re.search(r"(\d+)\s*(?:-|to)\s*(\d+)\s*years?", exp_text):
+            m = re.search(r"(\d+)\s*(?:-|to)\s*(\d+)\s*years?", exp_text)
+            exp_min = float(m.group(1))
+            exp_max = float(m.group(2))
+            exp_status = "FRESHER_ELIGIBLE" if exp_max <= 1.0 else "COMMERCIAL_EXPERIENCE_REQUIRED"
+        elif re.search(r"(\d+)\+?\s*years?", exp_text):
+            m = re.search(r"(\d+)\+?\s*years?", exp_text)
+            val = float(m.group(1))
+            exp_min = val
+            exp_max = val
+            exp_status = "FRESHER_ELIGIBLE" if val == 0 else "COMMERCIAL_EXPERIENCE_REQUIRED"
+
     # 3. Direct Apply Link (Never fallback to aggregator article URL)
     apply_url = None
     for a in clean_soup.find_all("a", href=True):
@@ -170,6 +206,9 @@ def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
         "deadline_status": deadline_status,
         "deadline_evidence": deadline_evidence,
         "eligible_batches": batches,
+        "experience_min_years": exp_min,
+        "experience_max_years": exp_max,
+        "experience_status": exp_status,
         "apply_url": apply_url,
     }
 
@@ -214,6 +253,9 @@ def scrape_campusdrive(limit: int = 20, fetch_details: bool = True) -> List[Oppo
         detail_data = {}
         if fetch_details:
             detail_data = extract_campusdrive_detail(full_url)
+            if detail_data.get("detail_status") == "REJECTED_PAGE_TYPE":
+                logger.info("[campusdrive] Ignoring rejected page %s: %s", full_url, detail_data.get("reason"))
+                continue
 
         title = detail_data.get("title") or raw_title
         company = detail_data.get("company") or "Unknown Employer"
@@ -230,14 +272,14 @@ def scrape_campusdrive(limit: int = 20, fetch_details: bool = True) -> List[Oppo
             source_name="CAMPUSDRIVE",
             source_listing_url=url,
             source_detail_url=full_url,
-            apply_url=detail_data.get("apply_url") or full_url,
+            apply_url=detail_data.get("apply_url"),
             location=["India"],
             deadline=detail_data.get("deadline"),
             deadline_status=detail_data.get("deadline_status", DeadlineStatus.UNKNOWN),
             eligible_graduation_batches=detail_data.get("eligible_batches", []),
-            experience_min_years=0.0,
-            experience_max_years=1.0,
-            experience_status="FRESHER_ELIGIBLE",
+            experience_min_years=detail_data.get("experience_min_years"),
+            experience_max_years=detail_data.get("experience_max_years"),
+            experience_status=detail_data.get("experience_status", "NOT_SPECIFIED"),
             company_verification_status=CompanyVerificationStatus.AGGREGATOR_ONLY,
             retrieved_at=datetime.utcnow().isoformat() + "Z",
         )

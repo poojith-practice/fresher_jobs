@@ -9,7 +9,10 @@ import abc
 import logging
 import time
 from typing import Any, Dict, List, Optional
-from curl_cffi import requests as cffi_requests
+try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    import requests as cffi_requests
 from config.settings import REQUEST_HEADERS
 
 logger = logging.getLogger("coverage_lab.scraper")

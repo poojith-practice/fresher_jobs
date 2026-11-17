@@ -18,7 +18,13 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 from bs4 import BeautifulSoup
-from ddgs import DDGS
+try:
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
 
 ROOT = Path(__file__).resolve().parent
 CATALOG_PATH = ROOT / "source_catalog.json"

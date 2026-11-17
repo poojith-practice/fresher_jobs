@@ -59,6 +59,43 @@ def application_is_verified_open(opp: Opportunity) -> bool:
     return True
 
 
+def assert_approval_invariants(opp: Opportunity) -> None:
+    """Enforces absolute multi-pillar invariants on any APPROVED opportunity.
+
+    Raises:
+        ValueError if any invariant is violated.
+    """
+    if opp.final_status != FinalApprovalStatus.APPROVED:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} final_status is {opp.final_status}, expected APPROVED")
+
+    if opp.llm_status != LLMStatus.APPROVED or not opp.llm_approved:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} lacks verified LLM approval (status={opp.llm_status}, approved={opp.llm_approved})")
+
+    if opp.company_verification_status != CompanyVerificationStatus.VERIFIED_EMPLOYER_POSTING:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} employer is not verified corporate posting ({opp.company_verification_status})")
+
+    if not opp.application_verification_result:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} application_verification_result is None")
+
+    if opp.application_verification_result.status != "OPEN" or opp.application_status != ApplicationStatus.OPEN:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} application is not OPEN ({opp.application_verification_result.status})")
+
+    if not opp.application_verification_result.evidence_text:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} lacks application verification evidence")
+
+    if opp.experience_status not in ("FRESHER_ELIGIBLE", "Fresher Eligible"):
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} experience_status is {opp.experience_status}, expected FRESHER_ELIGIBLE")
+
+    if opp.experience_max_years is not None and opp.experience_max_years > 1.0:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} experience_max_years ({opp.experience_max_years}) exceeds fresher ceiling")
+
+    if opp.rejection_reasons:
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} has unresolved rejection reasons: {opp.rejection_reasons}")
+
+    if getattr(opp, "has_experience_contradiction", False):
+        raise ValueError(f"Invariant violation: {opp.opportunity_id} has unresolved experience contradiction")
+
+
 class MultiGateVerificationEngine:
     """Rigorous multi-pillar verification engine."""
 
@@ -189,7 +226,7 @@ class MultiGateVerificationEngine:
             batches=opp.eligible_graduation_batches,
             opportunity_type=opp.opportunity_type,
         )
-        opp.experience_status = exp_summary
+        opp.experience_status = "FRESHER_ELIGIBLE" if exp_summary in ("Fresher Eligible", "FRESHER_ELIGIBLE") else exp_summary
         if not exp_ok:
             if exp_summary == "NOT_SPECIFIED":
                 manual_review_reasons.append("Experience requirement not specified in source posting")
@@ -270,6 +307,12 @@ class MultiGateVerificationEngine:
                 opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
             elif not opp.rejection_reasons:
                 opp.final_status = FinalApprovalStatus.APPROVED
+                try:
+                    assert_approval_invariants(opp)
+                except ValueError as exc:
+                    logger.warning("[final_approval] Approval invariant check failed on %s: %s", opp.opportunity_id, exc)
+                    opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
+                    opp.manual_review_reasons.append(str(exc))
         elif opp.llm_status == LLMStatus.MANUAL_REVIEW:
             opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
         elif opp.llm_status in (LLMStatus.UNAVAILABLE, LLMStatus.PENDING):

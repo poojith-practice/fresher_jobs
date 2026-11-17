@@ -40,6 +40,12 @@ class FreshersDuniaScraper(BaseScraper):
                 link_elem = card.find("a", href=True) if card.name != "a" else card
                 link = link_elem["href"] if link_elem and link_elem.has_attr("href") else url
 
+                from extraction.page_type_classifier import classify_page_type, PageType
+                page_type, reason = classify_page_type(url=link, html_content=title, title=title)
+                if page_type not in (PageType.JOB_DETAIL, PageType.DRIVE_DETAIL):
+                    logger.info("[freshersdunia] Skipping non-job card: '%s' (%s)", title, reason)
+                    continue
+
                 opp = Opportunity(
                     id=f"freshersdunia-{abs(hash(link)) % 10000000}",
                     opportunity_type=OpportunityType.OFF_CAMPUS_DRIVE if "drive" in title.lower() or "off campus" in title.lower() else OpportunityType.INDIVIDUAL_FRESHER_JOB,

@@ -59,9 +59,11 @@ class LocalDatasetStore:
         rejected: List[Dict] = []
         manual_review: List[Dict] = []
 
+        from verification.final_approval import assert_approval_invariants
         for opp in verified_opportunities:
             dumped = opp.model_dump()
             if opp.final_status == FinalApprovalStatus.APPROVED:
+                assert_approval_invariants(opp)
                 approved.append(dumped)
             elif opp.final_status == FinalApprovalStatus.MANUAL_REVIEW:
                 manual_review.append(dumped)

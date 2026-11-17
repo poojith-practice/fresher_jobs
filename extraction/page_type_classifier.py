@@ -23,14 +23,25 @@ class PageType(str, Enum):
 
 
 CATEGORY_PATTERNS = [
-    r"\b\d{4}\s+batch\s+drives\b",
-    r"\boff[\s-]campus\s+drives\s+list\b",
+    r"\b\d{4}\s+batch(?:\s+drives?)?\b",
+    r"\boff[\s-]campus\s+drives?\s+(?:list|hub|all)\b",
     r"\bjopenings\s+in\s+[a-zA-Z]+\b",
     r"\ball\s+jobs\b",
     r"\bcategory\s*:\b",
     r"\bbrowse\s+jobs\b",
     r"\bview\s+all\s+(?:jobs|drives|openings)\b",
     r"\blatest\s+job\s+updates\b",
+    r"\bjobs\s+by\s+(?:batch|category|location)\b",
+]
+
+NAVIGATION_PATTERNS = [
+    r"\binterview\s+questions?\b",
+    r"\bexam\s+(?:pattern|syllabus)\b",
+    r"\badmit\s+card\b",
+    r"\bselection\s+process\b",
+    r"\bplacement\s+papers?\b",
+    r"\bsyllabus\b",
+    r"\binterview\s+experience\b",
 ]
 
 DETAIL_PATTERNS = [
@@ -65,6 +76,11 @@ def classify_page_type(url: str, html_content: str, title: str = "") -> Tuple[Pa
     for pat in CATEGORY_PATTERNS:
         if re.search(pat, title_lower):
             return PageType.CATEGORY_PAGE, f"Title indicates category listing: '{title}'"
+
+    # 2b. Check for navigation/prep pages (e.g. "Interview Questions")
+    for pat in NAVIGATION_PATTERNS:
+        if re.search(pat, title_lower) or re.search(pat, url_lower):
+            return PageType.NAVIGATION, f"Page is career prep or interview questions: '{title or url}'"
 
     # 3. Check for multi-listing cards / repeated article excerpts
     article_cards = soup.find_all(["article", "div"], class_=re.compile(r"post-item|job-card|listing-item|card-job", re.I))

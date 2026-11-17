@@ -29,6 +29,8 @@ class LLMDecisionSchema(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     eligible_batches: List[str] = Field(default_factory=list)
     experience_assessment: str
+    experience_quote: Optional[str] = None
+    batch_quote: Optional[str] = None
     has_experience_contradiction: bool
     supporting_evidence: List[str] = Field(default_factory=list)
     contradictory_evidence: List[str] = Field(default_factory=list)
@@ -130,23 +132,27 @@ class LLMVerifierAdapter:
             logger.warning("[llm_adapter] No active LLM credentials configured. Failing closed.")
             return LLMStatus.UNAVAILABLE, False, "No active LLM credentials configured; fail-closed rule enforced", ["LLM verifier unavailable"]
 
+        app_res = opp.application_verification_result
+        app_status_str = app_res.status if app_res else (opp.application_status.value if opp.application_status else "UNKNOWN")
+        app_ev_str = app_res.evidence_text if app_res else (opp.application_status_evidence or "None")
+
         prompt = USER_TEMPLATE.format(
             title=opp.title,
             company=opp.company,
             requisition_id=opp.opportunity_id or "Not specified",
             apply_url=opp.apply_url or opp.source_detail_url or "Not specified",
-            application_status=opp.application_status.value if opp.application_status else "UNKNOWN",
-            application_evidence=opp.application_status_evidence or "None",
+            application_status=app_status_str,
+            application_evidence=app_ev_str,
             opp_type=opp.opportunity_type.value,
             batches=", ".join(str(b) for b in opp.eligible_graduation_batches) if opp.eligible_graduation_batches else "Not specified",
-            description=opp.description[:2000] if opp.description else "(No description available)",
+            description=opp.description[:3000] if opp.description else "(No description available)",
         )
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
-        source_text = f"{opp.title} {opp.company} {opp.description or ''}"
+        source_text = f"{opp.title} {opp.company} {opp.opportunity_id or ''} {app_ev_str} {opp.description or ''}"
 
         # 1. Try Groq keys
         groq_models = [os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), "openai/gpt-oss-20b"]
@@ -200,14 +206,40 @@ class LLMVerifierAdapter:
     def _process_schema(self, data: Dict[str, Any], source_text: str = "") -> Tuple[LLMStatus, bool, Optional[str], List[str]]:
         try:
             from verification.evidence_validator import validate_evidence_quote
-            # Anti-hallucination guard: validate supporting evidence quotes
+            if "eligible_batches" in data and isinstance(data["eligible_batches"], list):
+                data["eligible_batches"] = [str(b) for b in data["eligible_batches"]]
+            # Anti-hallucination guard 1: validate supporting evidence quotes
             for quote in data.get("supporting_evidence", []):
                 if quote and len(quote.strip()) > 10:
                     valid, reason = validate_evidence_quote(quote, source_text)
                     if not valid:
                         return LLMStatus.REJECTED, False, f"LLM evidence fabrication: {reason}", [reason]
 
+            # Anti-hallucination guard 2: validate experience quote
+            exp_quote = data.get("experience_quote") or ""
+            if exp_quote and len(exp_quote.strip()) > 5:
+                valid, reason = validate_evidence_quote(exp_quote, source_text)
+                if not valid:
+                    return LLMStatus.REJECTED, False, f"LLM fabricated experience quote: {reason}", [reason]
+
+            # Anti-hallucination guard 3: validate batch quote
+            batch_quote = data.get("batch_quote") or ""
+            if batch_quote and len(batch_quote.strip()) > 5:
+                valid, reason = validate_evidence_quote(batch_quote, source_text)
+                if not valid:
+                    return LLMStatus.REJECTED, False, f"LLM fabricated batch quote: {reason}", [reason]
+
             decision_obj = LLMDecisionSchema(**data)
+
+            # Invariant: If experience is NOT_SPECIFIED, cannot ACCEPT
+            if decision_obj.experience_assessment == "NOT_SPECIFIED" and decision_obj.decision == "ACCEPT":
+                return LLMStatus.MANUAL_REVIEW, False, "Cannot approve when experience requirement is NOT_SPECIFIED", ["Experience not specified in employer source"]
+
+            # Contradiction check
+            if decision_obj.has_experience_contradiction:
+                reasons = decision_obj.contradictory_evidence or ["Commercial experience contradiction detected"]
+                return LLMStatus.REJECTED, False, f"Rejected by LLM contradiction: {'; '.join(reasons)}", reasons
+
             if decision_obj.decision == "ACCEPT" and decision_obj.is_fresher_eligible:
                 reasoning = f"Approved by LLM (confidence: {decision_obj.confidence:.2f}): {'; '.join(decision_obj.supporting_evidence)}"
                 return LLMStatus.APPROVED, True, reasoning, []

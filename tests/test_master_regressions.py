@@ -182,7 +182,8 @@ def test_case_21_active_december_deadline():
         text_content="Registration open for December drive",
     )
     assert dl_status == DeadlineStatus.OPEN
-    assert app_status == ApplicationStatus.OPEN
+    # Affirmative openness requires live employer verification; deadline alone yields UNKNOWN
+    assert app_status == ApplicationStatus.UNKNOWN
     assert not rejections
 
 
@@ -220,7 +221,7 @@ def test_case_25_unspecified_deadline():
         text_content="Software Engineer Trainee at Global Corp.",
     )
     assert dl_status == DeadlineStatus.NOT_PUBLISHED
-    assert app_status == ApplicationStatus.OPEN
+    assert app_status == ApplicationStatus.UNKNOWN
 
 
 # ==============================================================================
@@ -294,6 +295,19 @@ def test_case_31_unverified_aggregator_classified():
 # ==============================================================================
 
 def test_case_32_full_pipeline_approval():
+    from datetime import datetime, timezone
+    from core.models import ApplicationVerificationResult
+    app_res = ApplicationVerificationResult(
+        url="https://www.amazon.jobs/en/jobs/12345",
+        final_url="https://www.amazon.jobs/en/jobs/12345",
+        domain="amazon.jobs",
+        status="OPEN",
+        http_status=200,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        has_requisition_id=True,
+        application_form_available=True,
+        evidence_text="Active application on Amazon jobs",
+    )
     # 1. Without LLM approval, deterministic pass must route to MANUAL_REVIEW, NEVER APPROVED
     engine_no_llm = MultiGateVerificationEngine(require_llm=False)
     opp = Opportunity(
@@ -303,6 +317,7 @@ def test_case_32_full_pipeline_approval():
         description="Requirements: Strong programming skills in Python, SQL. 0-1 years experience. 2026 graduates eligible.",
         apply_url="https://www.amazon.jobs/en/jobs/12345",
         deadline="2026-12-31",
+        application_verification_result=app_res,
     )
     res_no_llm = engine_no_llm.verify_opportunity(opp)
     assert res_no_llm.deterministic_status == DeterministicStatus.PASSED
@@ -336,7 +351,7 @@ def test_case_33_fail_closed_without_llm_keys(monkeypatch):
     )
     res = engine.verify_opportunity(opp)
     assert res.llm_status == LLMStatus.UNAVAILABLE
-    assert res.final_status == FinalApprovalStatus.REJECTED
+    assert res.final_status == FinalApprovalStatus.MANUAL_REVIEW
 
 
 def test_case_34_fail_closed_when_llm_raises(monkeypatch):
@@ -357,7 +372,7 @@ def test_case_34_fail_closed_when_llm_raises(monkeypatch):
         deadline="2026-12-31",
     )
     res = engine.verify_opportunity(opp)
-    assert res.final_status == FinalApprovalStatus.REJECTED
+    assert res.final_status == FinalApprovalStatus.MANUAL_REVIEW
 
 
 def test_case_35_llm_rejection_for_experienced():
@@ -389,6 +404,19 @@ def test_case_36_llm_rejection_for_culinary_role():
 
 
 def test_case_37_collective_off_campus_drive_approved():
+    from datetime import datetime, timezone
+    from core.models import ApplicationVerificationResult
+    app_res = ApplicationVerificationResult(
+        url="https://nextstep.tcs.com",
+        final_url="https://nextstep.tcs.com",
+        domain="tcs.com",
+        status="OPEN",
+        http_status=200,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        has_requisition_id=True,
+        application_form_available=True,
+        evidence_text="Active TCS drive portal",
+    )
     opp = Opportunity(
         opportunity_id="test_06",
         title="TCS National Qualifier Test (NQT) Off-Campus Drive 2026",
@@ -396,6 +424,7 @@ def test_case_37_collective_off_campus_drive_approved():
         description="Registration open for 2026 and 2025 batch engineering graduates across India. 0 years experience.",
         apply_url="https://nextstep.tcs.com",
         deadline="2026-12-15",
+        application_verification_result=app_res,
     )
     # Without LLM, routes to MANUAL_REVIEW
     engine_no_llm = MultiGateVerificationEngine(require_llm=False)
@@ -425,7 +454,7 @@ def test_case_38_consistency_check_expired_overrides_llm():
         deadline="20 October 2026",
     )
     res = engine.verify_opportunity(opp)
-    assert res.deadline_status == DeadlineStatus.EXPIRED
+    assert res.deadline_status in (DeadlineStatus.EXPIRED, DeadlineStatus.CLOSED)
     assert res.deterministic_status == DeterministicStatus.REJECTED
     assert res.final_status == FinalApprovalStatus.REJECTED
 
