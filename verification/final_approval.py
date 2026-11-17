@@ -8,6 +8,7 @@ Enforces multi-gate consistency checking to guarantee 100% adherence to fresher 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -20,10 +21,12 @@ from core.models import (
     DeterministicStatus,
     LLMStatus,
     FinalApprovalStatus,
+    ApplicationVerificationResult,
 )
 from verification.classification_engine import classify_opportunity
 from verification.company_verifier import verify_company_authenticity
 from verification.application_verifier import verify_application_deadline
+from extraction.apply_link_resolver import ApplyLinkResolver
 from verification.eligibility_engine import (
     evaluate_batch_eligibility,
     evaluate_experience_eligibility,
@@ -31,10 +34,29 @@ from verification.eligibility_engine import (
 )
 from verification.skills_extractor import extract_skills_dynamically
 from verification.llm_adapter import LLMVerifierAdapter
-
 from models.verification_result import CompanyAuthenticity
 
 logger = logging.getLogger("verification.final_approval")
+
+
+def application_is_verified_open(opp: Opportunity) -> bool:
+    """Verifies that an opportunity has independently established current live openness."""
+    if opp.application_status != ApplicationStatus.OPEN:
+        return False
+    res = opp.application_verification_result
+    if not res:
+        return False
+    if res.status != "OPEN":
+        return False
+    if res.http_status != 200:
+        return False
+    if not res.checked_at:
+        return False
+    if not res.evidence_text:
+        return False
+    if res.closed_notice_found:
+        return False
+    return True
 
 
 class MultiGateVerificationEngine:
@@ -86,7 +108,7 @@ class MultiGateVerificationEngine:
             rejection_reasons.append(f"Recruitment integrity contradiction: {'; '.join(comp_contras)}")
 
         # -------------------------------------------------------------
-        # Gate 3: Application Deadlines & Portal Status
+        # Gate 3: Application Deadlines & Live Requisition Verification
         # -------------------------------------------------------------
         deadline_st, app_st, parsed_dl, dl_rejections = verify_application_deadline(
             deadline_str=opp.deadline,
@@ -101,10 +123,58 @@ class MultiGateVerificationEngine:
         if dl_rejections:
             rejection_reasons.extend(dl_rejections)
 
+        # Inspect live application destination
+        target_apply_url = opp.apply_url or (opp.source_detail_url if opp.company_verification_status == CompanyVerificationStatus.VERIFIED_EMPLOYER_POSTING else None)
+        if opp.application_verification_result:
+            live_res = opp.application_verification_result
+            if live_res.status == "OPEN":
+                opp.application_status = ApplicationStatus.OPEN
+                opp.application_status_evidence = live_res.evidence_text
+            elif live_res.status == "CLOSED":
+                opp.application_status = ApplicationStatus.CLOSED
+                opp.deadline_status = DeadlineStatus.CLOSED
+                rejection_reasons.append(live_res.evidence_text or "Application closed on live employer portal")
+        elif target_apply_url:
+            req_m = re.search(r"/(?:jobs?|requisitions?|job|postings?)/([a-zA-Z0-9_-]{4,})", target_apply_url, re.I)
+            expected_req_id = req_m.group(1) if req_m else (opp.opportunity_id if opp.opportunity_id and not opp.opportunity_id.startswith(("cd_", "j4f_")) else None)
+            
+            live_res = ApplyLinkResolver.verify_application_live(
+                target_apply_url,
+                expected_requisition_id=expected_req_id,
+                expected_company=opp.company,
+            )
+            opp.application_verification_result = live_res
+            
+            if live_res.status == "OPEN":
+                opp.application_status = ApplicationStatus.OPEN
+                opp.application_status_evidence = live_res.evidence_text
+            elif live_res.status == "CLOSED":
+                opp.application_status = ApplicationStatus.CLOSED
+                opp.deadline_status = DeadlineStatus.CLOSED
+                rejection_reasons.append(live_res.evidence_text or "Application closed on live employer portal")
+            elif live_res.status == "EXPIRED":
+                opp.application_status = ApplicationStatus.CLOSED
+                opp.deadline_status = DeadlineStatus.EXPIRED
+                rejection_reasons.append(live_res.evidence_text or "Application deadline expired on live employer portal")
+            elif live_res.status == "LOGIN_REQUIRED":
+                opp.application_status = ApplicationStatus.LOGIN_REQUIRED
+                manual_review_reasons.append("Login wall encountered on employer portal")
+            elif live_res.status == "UNREACHABLE":
+                opp.application_status = ApplicationStatus.UNREACHABLE
+                manual_review_reasons.append(f"Employer portal unreachable: {live_res.error}")
+            elif live_res.status == "UNAVAILABLE":
+                opp.application_status = ApplicationStatus.UNKNOWN
+                manual_review_reasons.append(live_res.evidence_text or "Requisition ID not found on employer page")
+            else:
+                opp.application_status = ApplicationStatus.UNKNOWN
+                manual_review_reasons.append(live_res.evidence_text or "Live application status cannot be verified as currently open")
+        else:
+            opp.application_status = ApplicationStatus.UNKNOWN
+            manual_review_reasons.append("No verified direct employer application URL found")
+
         # -------------------------------------------------------------
         # Gate 4: Graduation Batch & Experience Eligibility
         # -------------------------------------------------------------
-        # Extract batches if not populated
         if not opp.eligible_graduation_batches:
             batches_found = extract_batches_from_text(f"{opp.title} {opp.description or ''}")
             opp.eligible_graduation_batches = batches_found
@@ -121,7 +191,10 @@ class MultiGateVerificationEngine:
         )
         opp.experience_status = exp_summary
         if not exp_ok:
-            rejection_reasons.extend(exp_contras)
+            if exp_summary == "NOT_SPECIFIED":
+                manual_review_reasons.append("Experience requirement not specified in source posting")
+            else:
+                rejection_reasons.extend(exp_contras)
 
         # -------------------------------------------------------------
         # Gate 5: Dynamic Skills Extraction (No Hallucination)
@@ -155,8 +228,9 @@ class MultiGateVerificationEngine:
                 opp.llm_approved = llm_ok
                 opp.llm_reasoning = llm_reason
 
-                # Consistency check: Ensure LLM did not overlook deterministic criteria
-                if not llm_ok:
+                if llm_st in (LLMStatus.MANUAL_REVIEW, LLMStatus.UNAVAILABLE, LLMStatus.PENDING):
+                    manual_review_reasons.append(llm_reason or f"LLM status: {llm_st.value}")
+                elif not llm_ok:
                     rejection_reasons.extend(llm_rejections or ["Rejected by LLM verifier"])
             else:
                 opp.llm_status = LLMStatus.PENDING
@@ -173,21 +247,28 @@ class MultiGateVerificationEngine:
         if opp.deterministic_status != DeterministicStatus.PASSED or opp.rejection_reasons:
             opp.final_status = FinalApprovalStatus.REJECTED
         elif not self.require_llm:
-            # Deterministic pass without LLM can NEVER produce APPROVED status
             opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
             if "LLM approval has not been executed" not in opp.manual_review_reasons:
                 opp.manual_review_reasons.append("Deterministic checks passed, but LLM approval has not been executed")
         elif opp.llm_status == LLMStatus.APPROVED and opp.llm_approved:
-            # Multi-pillar consistency check: Must have corroborated employer and active portal
-            if opp.company_verification_status == CompanyVerificationStatus.UNVERIFIED:
+            # Strict multi-pillar assertions: every requirement must be independently satisfied
+            if not application_is_verified_open(opp):
                 opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
-                opp.manual_review_reasons.append("Employer cannot be independently verified")
-            elif opp.application_status == ApplicationStatus.UNKNOWN:
+                if "Application is not independently verified as currently open" not in opp.manual_review_reasons:
+                    opp.manual_review_reasons.append("Application is not independently verified as currently open")
+            if opp.company_verification_status != CompanyVerificationStatus.VERIFIED_EMPLOYER_POSTING:
                 opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
-                opp.manual_review_reasons.append("Application status cannot be established with certainty")
-            elif opp.manual_review_reasons:
+                if "Employer cannot be independently verified" not in opp.manual_review_reasons:
+                    opp.manual_review_reasons.append("Employer cannot be independently verified")
+            if opp.experience_status in ["Senior Role", "Commercial Experience Required"]:
+                opp.final_status = FinalApprovalStatus.REJECTED
+            elif opp.experience_status == "NOT_SPECIFIED":
                 opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
-            else:
+                if "Experience requirement not specified" not in opp.manual_review_reasons:
+                    opp.manual_review_reasons.append("Experience requirement not specified")
+            if opp.manual_review_reasons:
+                opp.final_status = FinalApprovalStatus.MANUAL_REVIEW
+            elif not opp.rejection_reasons:
                 opp.final_status = FinalApprovalStatus.APPROVED
         elif opp.llm_status == LLMStatus.MANUAL_REVIEW:
             opp.final_status = FinalApprovalStatus.MANUAL_REVIEW

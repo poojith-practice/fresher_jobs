@@ -67,16 +67,27 @@ def parse_date_string(text: str) -> Optional[datetime]:
 
 
 def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
-    """Fetches and parses a CampusDrive detail page for true deadline and eligibility."""
+    """Fetches and parses a CampusDrive detail page with strict DOM isolation."""
     body, status, outcome = http_client.get(detail_url)
     if status != 200 or not body:
         return {"detail_status": outcome}
 
     soup = BeautifulSoup(body, "html.parser")
-    page_text = soup.get_text(" ", strip=True)
 
-    # 0. Extract H1 Title and Employer
-    h1 = soup.find("h1")
+    # Clean boilerplate before extracting text
+    for tag in soup(["nav", "header", "footer", "aside", "script", "style", "noscript"]):
+        tag.decompose()
+    for cl in ["sidebar", "navigation", "related-posts", "widget", "footer", "menu"]:
+        for el in soup.find_all(class_=re.compile(cl, re.I)):
+            el.decompose()
+
+    # Target article or entry-content container
+    article = soup.find("article") or soup.find("div", class_=re.compile(r"content|post-body|entry-content", re.I))
+    clean_soup = article if article else soup
+    clean_text = clean_soup.get_text(" ", strip=True)
+
+    # 0. Extract Article Title and Cleaned Employer/Role
+    h1 = clean_soup.find("h1") or soup.find("h1")
     raw_h1 = h1.get_text(strip=True) if h1 else ""
     company = ""
     role = ""
@@ -99,12 +110,12 @@ def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
 
     # 1. Parse 'Last Date to Register'
     deadline_date_str = None
-    deadline_status = DeadlineStatus.UNKNOWN
+    deadline_status = DeadlineStatus.NOT_PUBLISHED
     deadline_evidence = ""
 
     last_date_match = re.search(
         r"(?:last\s*date\s*to\s*register|registration\s*deadline|deadline|apply\s*before)\s*[:\-–—]?\s*([^.]+?)(?:\.|$|\||\n|eligible)",
-        page_text,
+        clean_text,
         re.I,
     )
     if last_date_match:
@@ -118,16 +129,14 @@ def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
                 deadline_status = DeadlineStatus.EXPIRED
             else:
                 deadline_status = DeadlineStatus.OPEN
-        elif any(k in raw_deadline_text.lower() for k in ["asap", "ongoing", "active"]):
-            deadline_status = DeadlineStatus.OPEN
         else:
-            deadline_status = DeadlineStatus.UNKNOWN
+            deadline_status = DeadlineStatus.NOT_PUBLISHED
 
-    # 2. Extract Eligible Batches (Targeted to batch sections, ignoring navbar years)
+    # 2. Extract Eligible Batches (Strictly within eligibility section only)
     batches = []
     batch_section = re.search(
-        r"(?:eligible\s*batches?|batch(?:es)?\s*eligible|passing\s*out\s*year|batch\s*criteria)\s*[:\-–—]?\s*([^\n<|]+?)(?:passing|academic|qualification|minimum|salary|$)",
-        page_text,
+        r"(?:eligible\s*batches?|batch(?:es)?\s*eligible|passing\s*out\s*year|batch\s*criteria)\s*[:\-–—]?\s*([^\n<|]+?)(?:passing|academic|qualification|minimum|salary|experience|$)",
+        clean_text,
         re.I,
     )
     if batch_section:
@@ -135,24 +144,13 @@ def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
         if matches:
             batches = sorted(list(set(int(b) for b in matches)))
 
-    if not batches:
-        article = soup.find("article") or soup.find("div", class_=re.compile(r"content|post-body|entry-content", re.I))
-        art_text = article.get_text(" ", strip=True) if article else ""
-        if art_text:
-            m = re.search(r"(?:eligible\s*batches?|batch|year\s*of\s*passing)\s*[:\-–—]?\s*([^\n<|]+)", art_text, re.I)
-            if m:
-                matches = re.findall(r"\b(202[0-9])\b", m.group(1))
-                if matches:
-                    batches = sorted(list(set(int(b) for b in matches)))
-
-    # 3. Direct Apply Link (Outbound employer link)
-    apply_url = detail_url
-    for a in soup.find_all("a", href=True):
+    # 3. Direct Apply Link (Never fallback to aggregator article URL)
+    apply_url = None
+    for a in clean_soup.find_all("a", href=True):
         href = a["href"].strip()
         link_text = a.get_text(strip=True).lower()
         if any(w in link_text for w in ["apply now", "apply online", "official link", "registration link"]):
             if href.startswith("http") and "campusdrive.in" not in href:
-                # Resolve LinkedIn safety redirect to direct employer url if present
                 if "linkedin.com/safety/go" in href and "url=" in href:
                     parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
                     target_url = parsed_q.get("url", [href])[0]
@@ -164,9 +162,10 @@ def extract_campusdrive_detail(detail_url: str) -> Dict[str, Any]:
     return {
         "detail_status": "SUCCESS",
         "title": role if role else raw_h1,
+        "source_article_title": raw_h1,
         "company": company,
         "role": role if role else raw_h1,
-        "description": page_text[:4000],
+        "description": clean_text[:4000],
         "deadline": deadline_date_str,
         "deadline_status": deadline_status,
         "deadline_evidence": deadline_evidence,

@@ -28,6 +28,7 @@ from core.models import (
     DeterministicStatus,
     LLMStatus,
     FinalApprovalStatus,
+    ApplicationVerificationResult,
 )
 from verification.classification_engine import classify_opportunity
 from verification.application_verifier import verify_application_deadline
@@ -256,6 +257,14 @@ def test_critique_genuine_sde_with_llm_and_verified_employer_is_approved():
         description="Requirements: Bachelor degree in Computer Science. 0-1 years software development experience. Knowledge of Python, Java.",
         apply_url="https://www.amazon.jobs/en/jobs/254321",
         deadline="2026-12-31",
+        application_verification_result=ApplicationVerificationResult(
+            original_url="https://www.amazon.jobs/en/jobs/254321",
+            resolved_url="https://www.amazon.jobs/en/jobs/254321",
+            http_status=200,
+            status="OPEN",
+            evidence_text="Active requisition verified on Amazon portal",
+            checked_at="2026-11-17T20:00:00",
+        ),
     )
     res = engine.verify_opportunity(opp)
     assert res.deterministic_status == DeterministicStatus.PASSED
@@ -289,6 +298,18 @@ def test_critique_csv_purity_verified_jobs_has_zero_rejected_records(tmp_path, m
         title="Software Engineer Fresher",
         company="Amazon",
         final_status=FinalApprovalStatus.APPROVED,
+        llm_status=LLMStatus.APPROVED,
+        llm_approved=True,
+        company_verification_status=CompanyVerificationStatus.VERIFIED_EMPLOYER_POSTING,
+        application_status=ApplicationStatus.OPEN,
+        application_verification_result=ApplicationVerificationResult(
+            original_url="https://amazon.jobs/1",
+            resolved_url="https://amazon.jobs/1",
+            http_status=200,
+            status="OPEN",
+            evidence_text="Active requisition verified on Amazon portal",
+            checked_at="2026-11-17T20:00:00",
+        ),
     )
     opp_rejected_pharma = Opportunity(
         opportunity_id="rej_1",

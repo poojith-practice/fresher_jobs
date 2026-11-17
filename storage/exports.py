@@ -99,6 +99,19 @@ def export_to_csv(opportunities: List[Opportunity], output_filename: str = "veri
         rejected_opps = [o for o in opportunities if o.final_status == FinalApprovalStatus.REJECTED]
         manual_opps = [o for o in opportunities if o.final_status == FinalApprovalStatus.MANUAL_REVIEW]
 
+        # Invariant check before exporting approved dataset
+        from verification.final_approval import application_is_verified_open
+        from core.models import LLMStatus, CompanyVerificationStatus
+        for rec in approved_opps:
+            if rec.final_status != FinalApprovalStatus.APPROVED:
+                raise ValueError(f"Export invariant violation: record {rec.opportunity_id} final_status is not APPROVED")
+            if rec.llm_status != LLMStatus.APPROVED or not rec.llm_approved:
+                raise ValueError(f"Export invariant violation: record {rec.opportunity_id} lacks LLM approval")
+            if not application_is_verified_open(rec):
+                raise ValueError(f"Export invariant violation: record {rec.opportunity_id} is not independently verified open")
+            if rec.company_verification_status != CompanyVerificationStatus.VERIFIED_EMPLOYER_POSTING:
+                raise ValueError(f"Export invariant violation: record {rec.opportunity_id} is not a verified employer posting")
+
         # 1. Main verified jobs file (Strictly APPROVED only)
         with open(target_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)

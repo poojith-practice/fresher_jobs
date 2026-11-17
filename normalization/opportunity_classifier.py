@@ -31,7 +31,6 @@ OFF_CAMPUS_PATTERNS = [
     r"\bpooled\s+drive\b",
     r"\bmultiple\s+roles\b",
     r"\bpan[\s-]?india\s+hiring\b",
-    r"\bdrive\b",
 ]
 
 INDIVIDUAL_ROLE_PATTERNS = [

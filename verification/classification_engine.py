@@ -124,6 +124,8 @@ GRADUATE_TRAINEE_PATTERNS = [
     r"\bengineer\s*trainee\b",
     r"\bassociate\s*software\s*engineer\b",
     r"\bgraduate\s*software\s*engineer\b",
+    r"\b(?:java|python|ai|ml|software|cloud|data|tech|it|developer|devops)\s+apprentice\b",
+    r"\bapprentice\b",
 ]
 
 EXPERIENCED_ROLE_PATTERNS = [
@@ -160,7 +162,6 @@ EXPLICIT_TECH_TITLES = [
     r"\bfirmware\s*engineer\b",
     r"\bcompiler\s*software\s*engineer\b",
     r"\bnetwork\s*(?:dev\s*)?engineer\b",
-    r"\b(?:[a-z0-9+#.-]+\s+)?business\s*analyst\b",
 ]
 
 

@@ -113,7 +113,8 @@ def verify_application_deadline(
                     rejection_reasons.append(f"Application closed notice in text: '{match.group(0)}'")
                     return DeadlineStatus.CLOSED, ApplicationStatus.CLOSED, iso_str, rejection_reasons
 
-            return DeadlineStatus.OPEN, ApplicationStatus.OPEN, iso_str, []
+            # Deadline is in future, but live application status requires live page verification
+            return DeadlineStatus.OPEN, ApplicationStatus.UNKNOWN, iso_str, []
 
     # 3. Check text content for closed notice
     for exp_pat in EXPIRED_PATTERNS:
@@ -134,7 +135,12 @@ def verify_application_deadline(
                     f"Application deadline of {dt.strftime('%d %B %Y')} has expired (current date: {now.strftime('%d %B %Y')})"
                 )
                 return DeadlineStatus.EXPIRED, ApplicationStatus.CLOSED, iso_str, rejection_reasons
-            return DeadlineStatus.OPEN, ApplicationStatus.OPEN, iso_str, []
+            return DeadlineStatus.OPEN, ApplicationStatus.UNKNOWN, iso_str, []
 
-    # 5. No explicit deadline or closure found
-    return DeadlineStatus.NOT_PUBLISHED, ApplicationStatus.OPEN, None, []
+    # 5. No explicit deadline or closure found - absence of evidence is NOT evidence of openness
+    return (
+        DeadlineStatus.NOT_PUBLISHED,
+        ApplicationStatus.UNKNOWN,
+        None,
+        [],
+    )

@@ -58,7 +58,7 @@ def load_employer_domains() -> Dict[str, List[str]]:
         domain_map = {}
         for item in registry:
             cname = (item.get("name") or "").lower()
-            domains = item.get("official_domains", [])
+            domains = [d for d in item.get("official_domains", []) if d.lower() not in MULTI_TENANT_ATS_DOMAINS]
             domain_map[cname] = domains
             for alias in item.get("aliases", []):
                 domain_map[alias.lower()] = domains
@@ -169,9 +169,27 @@ def verify_company_authenticity(
         return CompanyAuthenticity.VERIFIED_OFFICIAL, supporting, []
 
     # Check against known enterprise ATS domains
-    if any(domain.endswith(off_d) or domain == off_d for off_d in OFFICIAL_ENTERPRISE_DOMAINS):
-        supporting.append(f"Application hosted on verified enterprise ATS portal: {domain}")
-        return CompanyAuthenticity.VERIFIED_OFFICIAL, supporting, []
+    # ATS domain proves the ATS platform, but NOT that the employer owns the tenant or that the requisition is active
+    if any(domain.endswith(off_d) or domain == off_d for off_d in MULTI_TENANT_ATS_DOMAINS):
+        ats_tenant = domain.split(".")[0]
+        generic_words_set = {
+            "group", "india", "private", "limited", "technologies", "technology", "services",
+            "corporation", "solutions", "international", "global", "off", "campus", "hiring",
+            "drive", "careers", "unknown", "stealth", "startup", "confidential", "anonymous",
+            "employer", "company", "tech", "enterprise", "system", "systems", "network", "networks",
+            "pvt", "ltd", "corp", "inc", "llc", "jobs", "career", "fa", "us2", "eu", "apac",
+        }
+        comp_tokens = [w for w in re.split(r"\W+", comp_clean) if len(w) >= 3 and w not in generic_words_set]
+        tenant_matches_company = any(token in ats_tenant.lower() or ats_tenant.lower() in token for token in comp_tokens)
+
+        if tenant_matches_company:
+            supporting.append(f"Application hosted on recognized ATS platform ({domain}) with matching employer tenant: '{ats_tenant}'")
+            return CompanyAuthenticity.VERIFIED_OFFICIAL, supporting, []
+        else:
+            contradictions.append(
+                f"Multi-tenant ATS domain '{domain}' recognized, but tenant '{ats_tenant}' is not verified for employer '{company}'"
+            )
+            return CompanyAuthenticity.UNCORROBORATED, supporting, contradictions
 
     # Corroborate by company name keywords in domain (e.g. jobs.natwestgroup.com for NatWest)
     generic_words = {

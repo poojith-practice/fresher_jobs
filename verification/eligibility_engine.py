@@ -23,6 +23,12 @@ EXCLUDE_EXPERIENCE_PATTERNS = [
     r"\bminimum\s+([2-9]|\d{2,})\s*(?:years?|yrs?)\b",
     r"\bat\s+least\s+([2-9]|\d{2,})\s*(?:years?|yrs?)\b",
     r"\b([2-9]|\d{2,})\+\s*(?:years?|yrs?)\s+of\s+experience\b",
+    r"\b1\+\s*(?:years?|yrs?)\s+of\s+(?:non[\s-]internship|professional|full[\s-]time|industry|relevant|software)\b",
+    r"\b1\+\s*(?:years?|yrs?)\s+(?:of\s+)?experience\b",
+    r"\bminimum\s+1\+?\s*(?:years?|yrs?)\s+of\s+(?:non[\s-]internship|professional|full[\s-]time|industry|relevant)\b",
+    r"\bat\s+least\s+1\+?\s*(?:years?|yrs?)\s+of\s+(?:non[\s-]internship|professional|full[\s-]time|industry|relevant)\b",
+    r"\bnon[\s-]internship\s+(?:professional\s+)?(?:software\s+development\s+)?experience\b",
+    r"\b0\s*(?:[-–—]|to)\s*([3-9]|\d{2,})\s*(?:years?|yrs?)\b",  # e.g. 0-4 years (exceeds fresher limit)
 ]
 
 FRESHER_POSITIVE_PATTERNS = [
@@ -37,10 +43,17 @@ FRESHER_POSITIVE_PATTERNS = [
 
 
 def extract_batches_from_text(text: str) -> List[int]:
-    """Extracts all 4-digit graduation cohorts (e.g. 2024, 2025, 2026, 2027, 2028)."""
-    matches = re.findall(r"\b(202[0-9])\b", text)
-    batches = sorted(list(set(int(b) for b in matches)))
-    return batches
+    """Extracts graduation cohorts strictly from eligibility/batch sections, ignoring navigation text."""
+    batch_section = re.search(
+        r"(?:eligible\s*batches?|batch(?:es)?\s*(?:eligible|criteria)?|passing\s*out\s*year|year\s*of\s*passing|graduation\s*year|academic\s*eligibility)\s*[:\-–—]?\s*([^\n<|]+?)(?:passing|academic|qualification|minimum|salary|experience|$|\n)",
+        text,
+        re.IGNORECASE,
+    )
+    if batch_section:
+        matches = re.findall(r"\b(202[0-9])\b", batch_section.group(1))
+        if matches:
+            return sorted(list(set(int(b) for b in matches)))
+    return []
 
 
 def evaluate_batch_eligibility(batches: List[int]) -> Tuple[bool, List[str], List[str]]:
@@ -125,17 +138,11 @@ def evaluate_experience_eligibility(
 
     # 5. Missing Experience Handling
     if not has_fresher_mention and not contradictions:
-        if batches and any(b >= 2025 for b in batches):
+        if batches and any(b in [2025, 2026, 2027] for b in batches):
             supporting.append(f"Genuine graduate cohort verified by target batch: {', '.join(str(b) for b in batches)}")
             return True, "0 Years (Batch Corroborated)", supporting, []
-        if opportunity_type in [OpportunityType.OFF_CAMPUS_DRIVE, OpportunityType.GRADUATE_PROGRAM, OpportunityType.INTERNSHIP]:
-            supporting.append("Entry-level nature corroborated by campus recruitment drive / trainee program")
-            return True, "0-1 Years (Program Inferred)", supporting, []
-        if any(k in title.lower() for k in ["trainee", "associate", "intern", "graduate"]):
-            supporting.append("Entry-level title corroborated by trainee/graduate role")
-            return True, "0-1 Years (Title Inferred)", supporting, []
         
-        supporting.append("No contradictory experience stated")
-        return True, "Unspecified (Passes Negative Gating)", supporting, []
+        supporting.append("No explicit experience requirement stated in source posting")
+        return False, "NOT_SPECIFIED", supporting, ["Experience requirement not specified in source posting"]
 
     return True, "Fresher Eligible", supporting, []

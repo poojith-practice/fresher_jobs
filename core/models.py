@@ -93,6 +93,26 @@ class SkillEvidence(BaseModel):
     is_required: bool = True
 
 
+class ApplicationVerificationResult(BaseModel):
+    """Structured evidence from deep live application-page inspection."""
+    original_url: str = ""
+    resolved_url: str = ""
+    redirect_chain: List[str] = Field(default_factory=list)
+    http_status: int = 0
+    page_title: str = ""
+    canonical_url: Optional[str] = None
+    requisition_id_found: bool = False
+    requisition_id: Optional[str] = None
+    job_still_present: bool = False
+    closed_notice_found: bool = False
+    application_action_found: bool = False
+    application_form_available: bool = False
+    status: str = "UNKNOWN"  # OPEN, CLOSED, EXPIRED, UNREACHABLE, UNKNOWN, CONFLICTING_EVIDENCE, LOGIN_REQUIRED, UNAVAILABLE
+    evidence_text: str = ""
+    checked_at: Optional[str] = None
+    error: Optional[str] = None
+
+
 class Opportunity(BaseModel):
     """Normalised employment opportunity data model with strict provenance."""
     opportunity_id: str
@@ -124,6 +144,7 @@ class Opportunity(BaseModel):
     deadline_status: DeadlineStatus = DeadlineStatus.UNKNOWN
     application_status: ApplicationStatus = ApplicationStatus.UNKNOWN
     application_status_evidence: Optional[str] = None
+    application_verification_result: Optional[ApplicationVerificationResult] = None
 
     # Eligibility Metrics
     eligible_graduation_batches: List[int] = Field(default_factory=list)
