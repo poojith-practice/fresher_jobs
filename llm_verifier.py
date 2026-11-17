@@ -60,25 +60,64 @@ def get_openrouter_keys() -> list:
 class RotatingLLM:
     """
     Multi-provider, multi-key rotating LLM client with automatic failover.
-    Sequentially rotates through Groq keys (1 -> 2 -> 3) on rate limit or quota exhaustion.
-    If all Groq keys are exhausted, seamlessly falls back to OpenRouter keys (1 -> 2 -> 3).
+    Sequentially rotates through OpenRouter keys (1 -> 2 -> 3) first.
+    If all OpenRouter keys are exhausted, seamlessly falls back to Groq keys (1 -> 2 -> 3).
     """
 
     def __init__(self):
-        self.groq_keys = get_groq_keys()
         self.openrouter_keys = get_openrouter_keys()
-        self.active_groq_idx = 0
+        self.groq_keys = get_groq_keys()
         self.active_openrouter_idx = 0
+        self.active_groq_idx = 0
+        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free")
         self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
     def has_keys(self) -> bool:
-        return bool(self.groq_keys or self.openrouter_keys)
+        return bool(self.openrouter_keys or self.groq_keys)
 
     def invoke(self, messages: Any, max_tokens: Optional[int] = None) -> Any:
         from langchain_openai import ChatOpenAI
 
-        # 1. Iterate through configured Groq keys
+        # 1. Iterate through configured OpenRouter keys first (1 -> 2 -> 3)
+        while self.active_openrouter_idx < len(self.openrouter_keys):
+            curr_key = self.openrouter_keys[self.active_openrouter_idx]
+            key_id = f"OpenRouter Key #{self.active_openrouter_idx + 1}"
+            try:
+                client = ChatOpenAI(
+                    api_key=curr_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    model=self.openrouter_model,
+                    temperature=0.1,
+                    max_tokens=max_tokens or 600,
+                    default_headers={
+                        "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
+                        "X-Title": "Fresher Job Intelligence Scraper",
+                    },
+                )
+                return client.invoke(messages)
+            except Exception as exc:
+                err_str = str(exc).lower()
+                is_quota_or_rate = any(
+                    x in err_str
+                    for x in [
+                        "429", "rate limit", "quota", "free-models-per-day",
+                        "limit exceeded", "credits", "invalid", "401", "403"
+                    ]
+                )
+                if is_quota_or_rate:
+                    logger.warning(
+                        "[%s] Rate-limited / quota / auth error: %s. Rotating to next OpenRouter key...",
+                        key_id, exc
+                    )
+                    self.active_openrouter_idx += 1
+                else:
+                    logger.warning("[%s] Request failed: %s. Rotating to next OpenRouter key...", key_id, exc)
+                    self.active_openrouter_idx += 1
+
+        if self.openrouter_keys and self.active_openrouter_idx >= len(self.openrouter_keys):
+            logger.info("All %d configured OpenRouter keys exhausted. Shifting to Groq pool...", len(self.openrouter_keys))
+
+        # 2. Iterate through configured Groq keys as secondary fallback (1 -> 2 -> 3)
         while self.active_groq_idx < len(self.groq_keys):
             curr_key = self.groq_keys[self.active_groq_idx]
             key_id = f"Groq Key #{self.active_groq_idx + 1}"
@@ -95,55 +134,22 @@ class RotatingLLM:
                 err_str = str(exc).lower()
                 is_quota_or_rate = any(
                     x in err_str
-                    for x in ["429", "rate limit", "quota", "limit exceeded", "tokens per minute", "requests per minute", "invalid_api_key"]
+                    for x in [
+                        "429", "rate limit", "quota", "limit exceeded",
+                        "tokens per minute", "requests per minute", "invalid_api_key", "403"
+                    ]
                 )
                 if is_quota_or_rate:
                     logger.warning(
-                        "[%s] Rate-limited / quota exhausted: %s. Rotating to next key...",
+                        "[%s] Rate-limited / quota exhausted: %s. Rotating to next Groq key...",
                         key_id, exc
                     )
                     self.active_groq_idx += 1
                 else:
-                    logger.warning("[%s] Request failed: %s. Rotating to next key...", key_id, exc)
+                    logger.warning("[%s] Request failed: %s. Rotating to next Groq key...", key_id, exc)
                     self.active_groq_idx += 1
 
-        if self.groq_keys and self.active_groq_idx >= len(self.groq_keys):
-            logger.info("All %d configured Groq keys exhausted. Shifting to OpenRouter pool...", len(self.groq_keys))
-
-        # 2. Iterate through configured OpenRouter keys
-        while self.active_openrouter_idx < len(self.openrouter_keys):
-            curr_key = self.openrouter_keys[self.active_openrouter_idx]
-            key_id = f"OpenRouter Key #{self.active_openrouter_idx + 1}"
-            try:
-                client = ChatOpenAI(
-                    api_key=curr_key,
-                    base_url="https://openrouter.ai/api/v1",
-                    model=self.openrouter_model,
-                    temperature=0.1,
-                    max_tokens=max_tokens or 500,
-                    default_headers={
-                        "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
-                        "X-Title": "Fresher Job Intelligence Scraper",
-                    },
-                )
-                return client.invoke(messages)
-            except Exception as exc:
-                err_str = str(exc).lower()
-                is_quota_or_rate = any(
-                    x in err_str
-                    for x in ["429", "rate limit", "quota", "free-models-per-day", "limit exceeded", "credits", "invalid"]
-                )
-                if is_quota_or_rate:
-                    logger.warning(
-                        "[%s] Rate-limited / quota exhausted: %s. Rotating to next key...",
-                        key_id, exc
-                    )
-                    self.active_openrouter_idx += 1
-                else:
-                    logger.warning("[%s] Request failed: %s. Rotating to next key...", key_id, exc)
-                    self.active_openrouter_idx += 1
-
-        raise RuntimeError("All configured Groq and OpenRouter keys have been exhausted!")
+        raise RuntimeError("All configured OpenRouter and Groq keys have been exhausted!")
 
 
 def get_llm():

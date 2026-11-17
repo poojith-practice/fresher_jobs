@@ -166,11 +166,16 @@ def test_rotating_llm_key_failover(monkeypatch):
     from llm_verifier import RotatingLLM
     import os
 
+    # Clear OpenRouter keys to test pure Groq failover
+    monkeypatch.delenv("OPENROUTER_API_KEY1", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
     monkeypatch.setenv("GROQ_API_KEY1", "key_fail_1")
     monkeypatch.setenv("GROQ_API_KEY2", "key_success_2")
     monkeypatch.delenv("GROQ_API_KEY3", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     call_history = []
 
@@ -199,3 +204,80 @@ def test_rotating_llm_key_failover(monkeypatch):
     # Next call should directly use key 2 without repeating key 1!
     rotator.invoke("second call")
     assert call_history == ["key_fail_1", "key_success_2", "key_success_2"]
+
+
+def test_rotating_llm_openrouter_first_and_failover(monkeypatch):
+    from llm_verifier import RotatingLLM
+
+    # Set up 2 OpenRouter keys and 1 Groq key
+    monkeypatch.setenv("OPENROUTER_API_KEY1", "sk-or-v1-router_fail_1")
+    monkeypatch.setenv("OPENROUTER_API_KEY2", "sk-or-v1-router_success_2")
+    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_fallback_1")
+    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    call_history = []
+
+    class MockChatOpenAI:
+        def __init__(self, api_key, **kwargs):
+            self.api_key = api_key
+
+        def invoke(self, messages):
+            call_history.append(self.api_key)
+            if self.api_key == "sk-or-v1-router_fail_1":
+                raise RuntimeError("429 Rate limit exceeded: free model quota reached")
+            class Resp:
+                content = '{"is_fresher_eligible": true, "curated_skills": "Python, SQL"}'
+            return Resp()
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", MockChatOpenAI)
+
+    rotator = RotatingLLM()
+    assert len(rotator.openrouter_keys) == 2
+    assert len(rotator.groq_keys) == 1
+    res = rotator.invoke("test")
+    assert "is_fresher_eligible" in res.content
+    # Verified it tried OpenRouter Key 1 first, failed on 429, then succeeded on OpenRouter Key 2!
+    assert call_history == ["sk-or-v1-router_fail_1", "sk-or-v1-router_success_2"]
+    assert rotator.active_openrouter_idx == 1
+
+    # Next call should directly use OpenRouter Key 2 without repeating Key 1!
+    rotator.invoke("second call")
+    assert call_history == ["sk-or-v1-router_fail_1", "sk-or-v1-router_success_2", "sk-or-v1-router_success_2"]
+
+
+def test_rotating_llm_falls_back_to_groq_when_openrouter_exhausted(monkeypatch):
+    from llm_verifier import RotatingLLM
+
+    monkeypatch.setenv("OPENROUTER_API_KEY1", "sk-or-v1-router_fail_all")
+    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_success_1")
+    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    call_history = []
+
+    class MockChatOpenAI:
+        def __init__(self, api_key, **kwargs):
+            self.api_key = api_key
+
+        def invoke(self, messages):
+            call_history.append(self.api_key)
+            if self.api_key == "sk-or-v1-router_fail_all":
+                raise RuntimeError("429 Rate limit exceeded")
+            class Resp:
+                content = '{"is_fresher_eligible": true, "curated_skills": "Python, SQL"}'
+            return Resp()
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", MockChatOpenAI)
+
+    rotator = RotatingLLM()
+    res = rotator.invoke("test")
+    assert "is_fresher_eligible" in res.content
+    assert call_history == ["sk-or-v1-router_fail_all", "gsk_groq_success_1"]

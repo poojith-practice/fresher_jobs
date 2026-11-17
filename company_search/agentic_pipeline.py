@@ -136,53 +136,31 @@ class InterviewPrepPack(BaseModel):
 def get_configured_llm() -> tuple[Any, str]:
     """
     Returns an instantiated LangChain ChatModel and the active provider name.
-    Prioritizes GROQ_API_KEY, then OPENROUTER_API_KEY.
+    Prioritizes OPENROUTER_API_KEY (1 -> 2 -> 3), then GROQ_API_KEY (1 -> 2 -> 3).
 
     STRICT ERROR POLICY:
     Raises RuntimeError immediately if no valid API key is present. Fallback mode is disabled.
     """
-    groq_key = (
-        os.getenv("GROQ_API_KEY1")
-        or os.getenv("GROQ_API_KEY_1")
-        or os.getenv("GROQ_API_KEY2")
-        or os.getenv("GROQ_API_KEY_2")
-        or os.getenv("GROQ_API_KEY3")
-        or os.getenv("GROQ_API_KEY_3")
-        or os.getenv("GROQ_API_KEY", "")
-    ).strip().lstrip("#")
-    if groq_key and not groq_key.startswith("YOUR_") and not groq_key.startswith("gsk_PLACEHOLDER"):
-        try:
-            from langchain_openai import ChatOpenAI
-            model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-            logger.info(f"Using Groq LLM: {model_name}")
-            return ChatOpenAI(
-                api_key=groq_key,
-                base_url="https://api.groq.com/openai/v1",
-                model=model_name,
-                temperature=0.15,
-                max_tokens=LLM_MAX_COMPLETION_TOKENS
-            ), "groq"
-        except Exception as exc:
-            logger.error(f"Failed to initialize Groq ChatOpenAI: {exc}")
-            raise
+    openrouter_keys = []
+    for k_name in [
+        "OPENROUTER_API_KEY1", "OPENROUTER_API_KEY_1",
+        "OPENROUTER_API_KEY2", "OPENROUTER_API_KEY_2",
+        "OPENROUTER_API_KEY3", "OPENROUTER_API_KEY_3",
+        "OPENROUTER_API_KEY",
+    ]:
+        val = os.getenv(k_name, "").strip().lstrip("#").strip("\"'")
+        if val and not val.startswith("YOUR_") and not val.startswith("sk-or-PLACEHOLDER"):
+            if not val.startswith("sk-or-"):
+                val = f"sk-or-v1-{val}"
+            if val not in openrouter_keys:
+                openrouter_keys.append(val)
 
-    openrouter_key = (
-        os.getenv("OPENROUTER_API_KEY1")
-        or os.getenv("OPENROUTER_API_KEY_1")
-        or os.getenv("OPENROUTER_API_KEY2")
-        or os.getenv("OPENROUTER_API_KEY_2")
-        or os.getenv("OPENROUTER_API_KEY3")
-        or os.getenv("OPENROUTER_API_KEY_3")
-        or os.getenv("OPENROUTER_API_KEY", "")
-    ).strip().lstrip("#")
-    if openrouter_key and not openrouter_key.startswith("YOUR_") and not openrouter_key.startswith("sk-or-PLACEHOLDER"):
-        # Auto-fix: OpenRouter requires the 'sk-or-v1-' prefix
-        if not openrouter_key.startswith("sk-or-"):
-            openrouter_key = f"sk-or-v1-{openrouter_key}"
+    if openrouter_keys:
+        openrouter_key = openrouter_keys[0]
         try:
             from langchain_openai import ChatOpenAI
-            model_name = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
-            logger.info(f"Using OpenRouter LLM: {model_name}")
+            model_name = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free")
+            logger.info(f"Using OpenRouter LLM (Primary): {model_name}")
             return ChatOpenAI(
                 api_key=openrouter_key,
                 base_url="https://openrouter.ai/api/v1",
@@ -195,12 +173,40 @@ def get_configured_llm() -> tuple[Any, str]:
                 },
             ), "openrouter"
         except Exception as exc:
-            logger.error(f"Failed to initialize ChatOpenAI (OpenRouter): {exc}")
+            logger.warning(f"Failed to initialize ChatOpenAI (OpenRouter): {exc}. Attempting Groq fallback...")
+
+    groq_keys = []
+    for k_name in [
+        "GROQ_API_KEY1", "GROQ_API_KEY_1",
+        "GROQ_API_KEY2", "GROQ_API_KEY_2",
+        "GROQ_API_KEY3", "GROQ_API_KEY_3",
+        "GROQ_API_KEY",
+    ]:
+        val = os.getenv(k_name, "").strip().lstrip("#").strip("\"'")
+        if val and not val.startswith("YOUR_") and not val.startswith("gsk_PLACEHOLDER"):
+            if val not in groq_keys:
+                groq_keys.append(val)
+
+    if groq_keys:
+        groq_key = groq_keys[0]
+        try:
+            from langchain_openai import ChatOpenAI
+            model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+            logger.info(f"Using Groq LLM (Fallback): {model_name}")
+            return ChatOpenAI(
+                api_key=groq_key,
+                base_url="https://api.groq.com/openai/v1",
+                model=model_name,
+                temperature=0.15,
+                max_tokens=LLM_MAX_COMPLETION_TOKENS
+            ), "groq"
+        except Exception as exc:
+            logger.error(f"Failed to initialize Groq ChatOpenAI: {exc}")
             raise
 
     raise RuntimeError(
         "CRITICAL ERROR: No active LLM API key detected!\n"
-        "Please configure GROQ_API_KEY or OPENROUTER_API_KEY in your .env file.\n"
+        "Please configure OPENROUTER_API_KEY or GROQ_API_KEY in your .env file.\n"
         "Deterministic fallback mode has been disabled. Live LLM extraction and expert synthesis are required."
     )
 
