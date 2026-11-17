@@ -309,6 +309,38 @@ def scrape_fresher_jobs(
             for site, error in df.attrs.get("site_errors", {}).items():
                 site_errors.setdefault(site, []).append(error)
 
+    # -------------------------------------------------------------
+    # Lane 1 & Lane 3: Public Aggregators & Direct Employer Discovery
+    # -------------------------------------------------------------
+    try:
+        from discovery import run_discovery_pipeline
+        logger.info("[*] Discovering fresh opportunities from public aggregators & employer feeds...")
+        discovered_opps = run_discovery_pipeline(
+            include_aggregators=True,
+            include_search=False,
+            include_employers=True,
+            max_per_source=15,
+        )
+        logger.info(f"[*] Discovered {len(discovered_opps)} opportunities from public aggregators & employer feeds")
+        for opp in discovered_opps:
+            raw_job = {
+                "site": opp.source_name.lower(),
+                "title": opp.title,
+                "company": opp.company,
+                "location": ", ".join(opp.location) if opp.location else "India",
+                "date_posted": opp.date_posted or datetime.now().strftime("%Y-%m-%d"),
+                "description": opp.description or "",
+                "job_url_direct": opp.apply_url or opp.source_detail_url,
+                "job_url": opp.source_detail_url or opp.apply_url,
+                "apply_url": opp.apply_url or opp.source_detail_url,
+                "deadline": opp.deadline,
+                "eligible_batches": opp.eligible_graduation_batches,
+                "job_level": "entry_level",
+            }
+            all_raw_jobs.append(raw_job)
+    except Exception as exc:
+        logger.warning("Public aggregators / employer discovery encountered error: %s", exc)
+
     total_scraped = len(all_raw_jobs)
     logger.info(f"\nTotal raw jobs pulled across all queries: {total_scraped}")
 

@@ -1,0 +1,77 @@
+"""Declarative Source Catalog for Coverage Lab Scrapers."""
+from __future__ import annotations
+
+from typing import Dict, Any
+
+SOURCES_CONFIG: Dict[str, Dict[str, Any]] = {
+    "saarthi_drives": {
+        "id": "saarthi_drives",
+        "name": "JoinSaarthi Off-Campus Drives",
+        "url": "https://joinsaarthi.com/drives/off-campus",
+        "category": "off_campus_portal",
+        "enabled": True,
+        "rate_limit_seconds": 2.0,
+        "method": "next_data_json",
+        "description": "High-fidelity structured Next.js JSON drives from top IT & SaaS employers",
+    },
+    "campusdrive": {
+        "id": "campusdrive",
+        "name": "CampusDrive.in",
+        "url": "https://campusdrive.in/jobs",
+        "category": "off_campus_aggregator",
+        "enabled": True,
+        "rate_limit_seconds": 2.0,
+        "method": "html_cards",
+        "description": "Dedicated off-campus drive aggregator categorized by graduation batch",
+    },
+    "elitmus": {
+        "id": "elitmus",
+        "name": "eLitmus Evaluation",
+        "url": "https://www.elitmus.com/jobs",
+        "category": "assessment_platform",
+        "enabled": True,
+        "rate_limit_seconds": 3.0,
+        "method": "html_detail_hydration",
+        "description": "Tier-1 curated fresher assessment hiring board",
+    },
+    "useastra": {
+        "id": "useastra",
+        "name": "UseAstra Off-Campus Drives",
+        "url": "https://www.useastra.in/jobs/off-campus-drives",
+        "category": "off_campus_aggregator",
+        "enabled": True,
+        "rate_limit_seconds": 2.0,
+        "method": "html_cards",
+        "description": "Aggregator of active walk-in and off-campus recruitment drives",
+    },
+    "jobs4fresher": {
+        "id": "jobs4fresher",
+        "name": "Jobs4Fresher",
+        "url": "https://jobs4fresher.com",
+        "category": "off_campus_blog",
+        "enabled": True,
+        "rate_limit_seconds": 2.0,
+        "method": "html_wordpress_cards",
+        "description": "Fresher recruitment posts with direct company application links",
+    },
+    "hirastra": {
+        "id": "hirastra",
+        "name": "Hirastra Off-Campus Drives",
+        "url": "https://hirastra.com/off-campus-drives",
+        "category": "off_campus_aggregator",
+        "enabled": True,
+        "rate_limit_seconds": 2.0,
+        "method": "html_table",
+        "description": "Clean summary table of live recruitment drives across India",
+    },
+    "amazon_jobs": {
+        "id": "amazon_jobs",
+        "name": "Amazon Jobs India",
+        "url": "https://www.amazon.jobs/en/search.json?base_query=Fresher&country=IND",
+        "category": "official_corporate_api",
+        "enabled": True,
+        "rate_limit_seconds": 2.0,
+        "method": "rest_json_api",
+        "description": "Direct unauthenticated REST API from Amazon corporate careers",
+    },
+}

@@ -106,12 +106,25 @@ def is_valid_sheet_row(row: List[Any]) -> bool:
     if exp in {"not specified", "unspecified", "none", "nan", ""}:
         return False
 
-    # Strict location check using the filter engine (Mumbai / Hyderabad / Remote only)
+    # Strict non-tech triage
+    try:
+        from verification.classification_engine import classify_opportunity
+        from core.models import OpportunityType
+        opp_type, role_family, _ = classify_opportunity(title, "", company)
+        if opp_type in (OpportunityType.UNRELATED, OpportunityType.EXPERIENCED_JOB):
+            return False
+    except Exception:
+        pass
+
+    # Location check: Pan India / India and recognized technology off-campus drives have national eligibility
+    loc_clean = location.lower()
+    is_national = any(k in loc_clean for k in ["pan india", "anywhere in india", "india", "remote", "wfh"])
+    if is_national:
+        return True
+
     from filter_engine import is_valid_location
     loc_ok, _ = is_valid_location(location)
-    if not loc_ok:
-        return False
-    return True
+    return loc_ok
 
 
 def merge_job_rows(

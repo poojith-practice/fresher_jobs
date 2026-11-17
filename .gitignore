@@ -15,5 +15,9 @@ credentials.json
 # Local runtime artifacts (kept on disk but not committed)
 output/*
 !output/.gitkeep
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
 company_search/results/*
 !company_search/results/.gitkeep

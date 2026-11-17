@@ -239,9 +239,13 @@ def extract_requirements_and_skills_context(description: str, max_chars: int = 3
     return extracted_text[:max_chars].strip()
 
 
-SYSTEM_GATEKEEPER_PROMPT = """Read the job description and decide whether this job is for a fresher (0-1 years, no prior professional experience) or whether it requires prior experience.
+SYSTEM_GATEKEEPER_PROMPT = """Read the job description and decide whether this job is for a technology/software fresher (0-1 years, no prior professional experience) or whether it requires prior experience or is a non-technical role.
 
-Requirements like specialist tools (SAP, Salesforce, Oracle, Workday), "proficiency in ...", "experience in/with ...", senior scope, or owning client work mean prior experience. Freshers, 0-1 years, fresh graduate, trainee, or "no prior experience required" mean eligible. If the description lists no requirements or qualifications at all (only company boilerplate or "as per JD"), or is unclear, return false.
+Strict negative constraints:
+1. Reject any non-technical roles: Reject culinary, cooking, chef, hospitality, pharmaceutical manufacturing, paint/chemical operations, manual maintenance, retail sales, BPO/voice/non-voice customer care, telecalling, video KYC, audio content evaluation, financial accounting/audit/FP&A, or back-office operations. Only genuine software/technology fresher roles (software engineering, web development, data engineering/analysis, QA/testing, DevOps, cloud engineering, or official technology campus recruitment drives) are eligible. If non-tech, set is_fresher_eligible: false and rejection_reason: "Non-technical role".
+2. Requirements like specialist tools (SAP, Salesforce, Oracle, Workday), "proficiency in ...", "experience in/with ...", senior scope, or owning client work mean prior experience.
+3. Freshers, 0-1 years, fresh graduate, trainee, or "no prior experience required" mean eligible only if in a technology/software role.
+4. If the description lists no requirements or qualifications at all (only company boilerplate or "as per JD"), or is unclear, return false.
 
 Return only this JSON:
 {

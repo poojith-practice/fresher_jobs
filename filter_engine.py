@@ -683,12 +683,67 @@ def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
     Enforces that all fields (title, company, location, category, experience, apply URL)
     are strictly valid and complete.
     """
-    title = job.get("title")
-    company = job.get("company")
-    location = job.get("location")
+    title = str(job.get("title") or "")
+    company = str(job.get("company") or "")
+    location = str(job.get("location") or "")
     date_posted = job.get("date_posted")
-    desc = job.get("description")
+    desc = str(job.get("description") or "")
     level = job.get("job_level")
+
+    # -------------------------------------------------------------
+    # 0. STRICT NON-TECH & ROLE FAMILY TRIAGE GATE
+    # -------------------------------------------------------------
+    from verification.classification_engine import classify_opportunity
+    from core.models import OpportunityType
+    opp_type, role_family, class_reasons = classify_opportunity(
+        title=title,
+        description=desc,
+        company=company,
+    )
+    if opp_type == OpportunityType.UNRELATED:
+        job["is_valid_fresher_job"] = False
+        job["rejection_reason"] = f"Non-tech / non-software role: {'; '.join(class_reasons)}"
+        job["quality_score"] = 0
+        return job
+    elif opp_type == OpportunityType.EXPERIENCED_JOB:
+        job["is_valid_fresher_job"] = False
+        job["rejection_reason"] = f"Experienced / senior role: {'; '.join(class_reasons)}"
+        job["quality_score"] = 0
+        return job
+
+    # -------------------------------------------------------------
+    # 0b. REVERSE EMPLOYER DOMAIN & INTEGRITY CHECK
+    # -------------------------------------------------------------
+    from verification.company_verifier import verify_company_authenticity
+    from models.verification_result import CompanyAuthenticity
+    apply_url_probe = resolve_apply_url(job)
+    comp_status, comp_pos, comp_contras = verify_company_authenticity(
+        company=company,
+        apply_url=apply_url_probe,
+        text_content=desc,
+    )
+    if comp_status in (CompanyAuthenticity.FRAUDULENT, CompanyAuthenticity.SUSPICIOUS) or any(
+        "scam" in c.lower() or "fee" in c.lower() or "mismatch" in c.lower() for c in comp_contras
+    ):
+        job["is_valid_fresher_job"] = False
+        job["rejection_reason"] = f"Recruitment integrity contradiction: {'; '.join(comp_contras)}"
+        job["quality_score"] = 0
+        return job
+
+    # -------------------------------------------------------------
+    # 0c. APPLICATION DEADLINE CHECK
+    # -------------------------------------------------------------
+    from verification.application_verifier import verify_application_deadline
+    from core.models import DeadlineStatus
+    deadline_st, app_st, parsed_dl, dl_rejections = verify_application_deadline(
+        deadline_str=job.get("deadline"),
+        text_content=f"{title} {desc}",
+    )
+    if deadline_st == DeadlineStatus.EXPIRED:
+        job["is_valid_fresher_job"] = False
+        job["rejection_reason"] = "Registration deadline expired"
+        job["quality_score"] = 0
+        return job
 
     # Run tests
     job = enrich_experience_and_salary(job)
@@ -697,7 +752,18 @@ def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
     within_48h, date_reason = is_within_hours(date_posted, MAX_HOURS_OLD)
     fresher_ok, exp_reason = is_fresher_job(title, experience, desc, level)
     legit_ok, legit_reason = is_legitimate_company(company, title, desc)
-    loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
+
+    # Location check: Off-campus drives and explicit national roles have national eligibility
+    loc_clean = location.strip().lower()
+    is_national = (
+        opp_type in (OpportunityType.OFF_CAMPUS_DRIVE, OpportunityType.GRADUATE_PROGRAM)
+        or loc_clean in ("india", "pan india", "anywhere in india", "remote", "work from home", "wfh")
+    )
+    if is_national:
+        loc_ok = True
+        loc_reason = "Valid national / off-campus drive location"
+    else:
+        loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
 
     # Resolve apply URL
     apply_url = resolve_apply_url(job)
@@ -707,10 +773,14 @@ def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
     # Strictly disallow "Not specified" / "Unspecified" experience
     has_valid_exp = bool(experience and str(experience).strip().lower() not in {"not specified", "unspecified", "none", "nan"})
 
-    category = categorize_role(title, desc)
-    has_valid_cat = bool(category)
-    if not category:
-        category = "Unmatched Tech Role"
+    if opp_type in (OpportunityType.OFF_CAMPUS_DRIVE, OpportunityType.GRADUATE_PROGRAM):
+        category = role_family
+        has_valid_cat = True
+    else:
+        category = categorize_role(title, desc)
+        has_valid_cat = bool(category)
+        if not category:
+            category = "Unmatched Tech Role"
 
     job["tech_category"] = category
 
