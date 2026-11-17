@@ -96,7 +96,6 @@ def is_valid_sheet_row(row: List[Any]) -> bool:
     title = str(row[0] or "").strip()
     company = str(row[1] or "").strip()
     location = str(row[2] or "").strip()
-    category = str(row[3] or "").strip()
     exp = str(row[5] or "").strip().lower()
     apply_url = str(row[8] or "").strip()
 
@@ -107,10 +106,9 @@ def is_valid_sheet_row(row: List[Any]) -> bool:
     if exp in {"not specified", "unspecified", "none", "nan", ""}:
         return False
 
-    # Strict location check using the filter engine (Mumbai / Hyderabad / Remote or Off-Campus Drive)
-    from filter_engine import is_valid_location, is_off_campus_drive
-    is_drive = category == "Off-Campus Recruitment Drive" or is_off_campus_drive(title)
-    loc_ok, _ = is_valid_location(location, is_drive=is_drive)
+    # Strict location check using the filter engine (Mumbai / Hyderabad / Remote only)
+    from filter_engine import is_valid_location
+    loc_ok, _ = is_valid_location(location)
     if not loc_ok:
         return False
     return True

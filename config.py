@@ -20,10 +20,6 @@ MAX_HOURS_OLD: int = 20
 TARGET_SITES: List[str] = ["naukri", "indeed", "linkedin", "monsterindia"]
 UNSUPPORTED_SITES: List[str] = []
 
-# Feature flags for Stage B: Off-Campus Recruitment Drives & Corporate Portals
-ENABLE_OFF_CAMPUS_DRIVES: bool = os.getenv("ENABLE_OFF_CAMPUS_DRIVES", "true").lower() == "true"
-OFF_CAMPUS_LIMIT_PER_SOURCE: int = int(os.getenv("OFF_CAMPUS_LIMIT_PER_SOURCE", "15"))
-
 # Target locations (India)
 DEFAULT_LOCATIONS: List[str] = ["Mumbai", "Hyderabad"]
 

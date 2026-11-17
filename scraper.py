@@ -30,8 +30,6 @@ from config import (
     QUERY_CONCURRENCY,
     JOBSPY_PROXIES,
     ROLE_QUERIES,
-    ENABLE_OFF_CAMPUS_DRIVES,
-    OFF_CAMPUS_LIMIT_PER_SOURCE,
 )
 from filter_engine import (
     evaluate_job,
@@ -39,7 +37,6 @@ from filter_engine import (
     is_legitimate_company,
     is_valid_location,
     normalize_location_for_search,
-    is_off_campus_drive,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -312,17 +309,6 @@ def scrape_fresher_jobs(
             for site, error in df.attrs.get("site_errors", {}).items():
                 site_errors.setdefault(site, []).append(error)
 
-    # Stage B Integration: Gather Off-Campus Recruitment Drives & Corporate Portals
-    if ENABLE_OFF_CAMPUS_DRIVES:
-        try:
-            from off_campus_scrapers import scrape_all_off_campus_sources
-            logger.info("\n[*] Executing Off-Campus Recruitment Drives & Corporate Portals scrapers...")
-            off_campus_jobs = scrape_all_off_campus_sources(limit_per_source=OFF_CAMPUS_LIMIT_PER_SOURCE)
-            all_raw_jobs.extend(off_campus_jobs)
-            logger.info("-> Discovered %d off-campus & corporate opportunities across 7 portals.", len(off_campus_jobs))
-        except Exception as exc:
-            logger.error("Failed to run off-campus scrapers: %s", exc)
-
     total_scraped = len(all_raw_jobs)
     logger.info(f"\nTotal raw jobs pulled across all queries: {total_scraped}")
 
@@ -431,93 +417,67 @@ def scrape_fresher_jobs(
                 )
 
         if evaluated["is_valid_fresher_job"]:
-            # 5. Dual-Track Gatekeeper & Skills Curator.
-            # Enforces LLM verification on job boards, while honoring verified
-            # off-campus recruitment drives & corporate portal listings.
-            is_drive_or_curated = (
-                evaluated.get("opportunity_type") == "OFF_CAMPUS_DRIVE"
-                or is_off_campus_drive(evaluated.get("title"), evaluated.get("description"))
-                or evaluated.get("site") in {
-                    "JOBSAARTHI", "CAMPUSDRIVE", "ELITMUS", "USEASTRA",
-                    "JOBS4FRESHER", "HIRASTRA", "AMAZON_CAREERS"
-                }
-            )
-
+            # 5. Final LLM Gatekeeper & Skills Curator.
+            # HARD GATE: only a job the LLM explicitly approves may reach
+            # valid_jobs and the live Google Sheet. Anything we cannot verify
+            # goes to manual review instead of being trusted by default.
             try:
                 from llm_verifier import hydrate_job_description, verify_fresher_and_curate_skills, extract_fallback_skills
                 desc = hydrate_job_description(evaluated)
-                llm_eval = None
+                if not desc:
+                    evaluated["needs_review"] = True
+                    evaluated["review_reason"] = (
+                        "Description unavailable; cannot run the LLM fresher gate"
+                    )
+                    review_jobs.append(evaluated)
+                    continue
 
-                if desc and len(desc) >= 80:
-                    try:
-                        llm_eval = verify_fresher_and_curate_skills(
-                            description=desc,
-                            title=str(evaluated.get("title", "")),
-                            company=str(evaluated.get("company", ""))
-                        )
-                    except Exception as llm_err:
-                        logger.warning("LLM evaluation exception for '%s': %s", evaluated.get("title"), llm_err)
+                llm_eval = verify_fresher_and_curate_skills(
+                    description=desc,
+                    title=str(evaluated.get("title", "")),
+                    company=str(evaluated.get("company", ""))
+                )
+                llm_verified = bool(llm_eval.get("llm_verified", False))
+                evaluated["llm_verified"] = llm_verified
+                evaluated["llm_eligible"] = bool(llm_eval.get("is_fresher_eligible", False))
+                evaluated["llm_experience_detected"] = str(
+                    llm_eval.get("experience_detected") or ""
+                )
 
-                if llm_eval and llm_eval.get("llm_verified"):
-                    # LLM produced a definitive verdict
-                    if not llm_eval.get("is_fresher_eligible", False):
+                if not llm_eval.get("is_fresher_eligible", False):
+                    if llm_verified:
                         evaluated["is_valid_fresher_job"] = False
                         evaluated["rejection_reason"] = (
                             "LLM Gatekeeper: "
                             f"{llm_eval.get('rejection_reason') or 'Requires prior experience'}"
                         )
                         rejected_jobs.append(evaluated)
-                        continue
-
-                    evaluated["llm_verified"] = True
-                    evaluated["llm_eligible"] = True
-                    evaluated["llm_experience_detected"] = str(llm_eval.get("experience_detected") or "")
-                    skills = str(llm_eval.get("curated_skills") or "").strip()
-                    if not skills:
-                        skills = extract_fallback_skills(desc, title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
-                    evaluated["skills_requirements"] = skills
-
-                elif is_drive_or_curated:
-                    # Verified off-campus recruitment drive or corporate portal listing
-                    evaluated["llm_verified"] = True
-                    evaluated["llm_eligible"] = True
-                    evaluated["llm_experience_detected"] = "Verified Off-Campus Recruitment Drive / Corporate Portal"
-                    skills = extract_fallback_skills(desc or evaluated.get("title", ""), title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
-                    evaluated["skills_requirements"] = skills
-
-                else:
-                    evaluated["needs_review"] = True
-                    evaluated["review_reason"] = (
-                        "Description unavailable or LLM gate unavailable; cannot verify fresher eligibility"
-                    )
-                    review_jobs.append(evaluated)
+                    else:
+                        evaluated["needs_review"] = True
+                        evaluated["review_reason"] = (
+                            "LLM gate unavailable: "
+                            f"{llm_eval.get('rejection_reason') or 'verification did not complete'}"
+                        )
+                        review_jobs.append(evaluated)
                     continue
 
+                skills = str(llm_eval.get("curated_skills") or "").strip()
+                if not skills:
+                    skills = extract_fallback_skills(desc, title=str(evaluated.get("title", "")), role=str(evaluated.get("tech_category", "")))
+                evaluated["skills_requirements"] = skills
             except Exception as e:
                 logger.warning("LLM verification step encountered error: %s", e)
-                if is_drive_or_curated:
-                    evaluated["llm_verified"] = True
-                    evaluated["llm_eligible"] = True
-                    from llm_verifier import extract_fallback_skills
-                    evaluated["skills_requirements"] = extract_fallback_skills(
-                        str(evaluated.get("description", "")),
-                        title=str(evaluated.get("title", "")),
-                        role=str(evaluated.get("tech_category", ""))
-                    )
-                else:
-                    evaluated["needs_review"] = True
-                    evaluated["review_reason"] = f"LLM gate unavailable: {e}"
-                    review_jobs.append(evaluated)
-                    continue
+                evaluated["needs_review"] = True
+                evaluated["review_reason"] = f"LLM gate unavailable: {e}"
+                review_jobs.append(evaluated)
+                continue
 
             # Final safety check: NEVER allow a job into valid_jobs without skills_requirements
             if not str(evaluated.get("skills_requirements") or "").strip():
-                from llm_verifier import extract_fallback_skills
-                evaluated["skills_requirements"] = extract_fallback_skills(
-                    str(evaluated.get("description", "")),
-                    title=str(evaluated.get("title", "")),
-                    role=str(evaluated.get("tech_category", ""))
-                )
+                evaluated["is_valid_fresher_job"] = False
+                evaluated["rejection_reason"] = "Missing required skills/responsibilities"
+                rejected_jobs.append(evaluated)
+                continue
 
             valid_jobs.append(evaluated)
         elif evaluated.get("needs_review"):
