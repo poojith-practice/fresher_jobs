@@ -499,10 +499,12 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
                         clean_desc = desc_div.get_text(separator="\n", strip=True)
                         job["description"] = clean_desc
                         return clean_desc
-                elif res.status_code == 429:
+                elif res.status_code in (429, 403, 999):
+                    logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s. Stopping further LinkedIn requests.", res.status_code, li_id)
                     try:
                         import scraper
-                        scraper._LINKEDIN_RATE_LIMITED = True
+                        with scraper._LINKEDIN_LOCK:
+                            scraper._LINKEDIN_RATE_LIMITED = True
                     except Exception:
                         pass
             except Exception as e:

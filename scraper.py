@@ -168,8 +168,8 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
             if desc_text:
                 _LINKEDIN_DESCRIPTION_CACHE[jid] = desc_text
                 raw_job["description"] = desc_text
-        elif resp.status_code == 429:
-            logger.warning("LinkedIn guest endpoint rate-limited (HTTP 429) for job %s. Stopping further LinkedIn requests.", jid)
+        elif resp.status_code in (429, 403, 999):
+            logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s. Stopping further LinkedIn requests.", resp.status_code, jid)
             with _LINKEDIN_LOCK:
                 _LINKEDIN_RATE_LIMITED = True
     except Exception as exc:
