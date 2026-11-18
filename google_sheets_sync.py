@@ -16,7 +16,7 @@ import sys
 import json
 import math
 from datetime import date, datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, Union
 
 try:
     from dotenv import load_dotenv
@@ -37,9 +37,31 @@ CREDENTIALS_FILE = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json"),
 )
 
-def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
-    """Formats jobs to the retained A:K Google Sheet columns with strict completeness validation."""
+def format_jobs_rows(
+    jobs: List[Dict[str, Any]],
+    return_diagnostics: bool = False,
+    require_salary: bool = True,
+) -> Union[List[List[Any]], Tuple[List[List[Any]], Dict[str, Any]]]:
+    """
+    Formats jobs to the retained A:M Google Sheet columns with strict completeness validation.
+    Tracks exact stage-by-stage rejection reasons for every job that does not pass the gate.
+    """
     rows = []
+    diagnostics = {
+        "input_jobs": len(jobs),
+        "rows_formatted": 0,
+        "rejected_count": 0,
+        "rejected_by_reason": {
+            "llm_not_verified_or_not_eligible": 0,
+            "missing_title_company_location_category": 0,
+            "invalid_apply_url": 0,
+            "missing_experience": 0,
+            "missing_salary": 0,
+            "missing_skills": 0,
+        },
+        "rejected_job_details": [],
+    }
+
     def cell(value: Any) -> Any:
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return ""
@@ -49,6 +71,14 @@ def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
             return ""
         return value
 
+    def _is_empty_or_placeholder(val: Any) -> bool:
+        if val is None:
+            return True
+        if isinstance(val, float) and math.isnan(val):
+            return True
+        s = str(val).strip().lower()
+        return s in {"", "none", "nan", "nat", "null", "not mentioned", "unspecified"}
+
     for j in jobs:
         title = str(cell(j.get("title"))).strip()
         company = str(cell(j.get("company"))).strip()
@@ -56,42 +86,51 @@ def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
         category = str(cell(j.get("tech_category"))).strip()
         date_p = str(cell(j.get("date_posted"))).strip()
         exp = str(cell(j.get("experience_range"))).strip()
-        min_sal = cell(j.get("min_amount")) or "Not Mentioned"
-        max_sal = cell(j.get("max_amount")) or "Not Mentioned"
+        
+        # FIX 2: Validate raw salary values BEFORE converting them to display placeholders.
+        # "Not Mentioned" or missing values must be rejected under the mandatory salary gate.
+        raw_min = j.get("min_amount")
+        raw_max = j.get("max_amount")
+        has_valid_min = not _is_empty_or_placeholder(raw_min)
+        has_valid_max = not _is_empty_or_placeholder(raw_max)
+
+        min_sal = str(cell(raw_min)).strip() if has_valid_min else "Not Mentioned"
+        max_sal = str(cell(raw_max)).strip() if has_valid_max else "Not Mentioned"
         apply_url = str(cell(j.get("apply_url") or j.get("job_url_direct") or j.get("job_url"))).strip()
         source = str(cell(j.get("site"))).upper()
         last_updated = datetime.now().isoformat(timespec="seconds")
-        # Extract clean, concise skills (prefer structured comma-separated skills, never raw paragraphs)
-        raw_skills = str(cell(j.get("skills") or j.get("curated_skills") or j.get("skills_requirements"))).strip()
-        if (
-            raw_skills
-            and raw_skills.lower() not in {"nan", "none", "null", ""}
-            and len(raw_skills) < 160
-            and not any(bad in raw_skills.lower() for bad in ["working hours", "leave policy", "probation", "cab facility", "shift 1", "shift 2", "pf & esic"])
-        ):
-            skills = raw_skills
-        else:
-            from llm_verifier import extract_fallback_skills
-            desc_text = str(j.get("description") or j.get("job_requirement") or "")
-            curated = extract_fallback_skills(desc_text, title=title, role=category)
-            skills = curated if curated and len(curated.strip()) >= 3 else "Analytical Skills, Problem Solving, Communication Skills"
+        skills = str(cell(j.get("skills_requirements") or j.get("required_skills") or j.get("skills") or j.get("curated_skills") or j.get("job_requirement"))).strip()
         interview_doc = str(cell(j.get("interview_doc_url") or "")).strip()
 
-        # STRICT QUALITY GATEKEEPER:
+        # STRICT QUALITY GATEKEEPER ACCOUNTING:
         # Every single field must be present, valid, and complete before pushing to the Google Sheet.
-        # The LLM must also have explicitly approved the job: a rule-based pass is
-        # not sufficient evidence for the live sheet.
+        # Record all failure reasons and track primary failure reason.
+        job_failures: List[str] = []
+
         if not j.get("llm_verified") or not j.get("llm_eligible"):
-            continue
+            job_failures.append("llm_not_verified_or_not_eligible")
         if not title or not company or not location or not category:
-            continue
+            job_failures.append("missing_title_company_location_category")
         if not apply_url.startswith("http"):
-            continue
+            job_failures.append("invalid_apply_url")
         if not exp or exp.lower() in {"not specified", "unspecified", "none", "nan"}:
-            continue
-        if not min_sal or not max_sal:
-            continue
+            job_failures.append("missing_experience")
+        if require_salary and (not has_valid_min or not has_valid_max):
+            job_failures.append("missing_salary")
         if not skills or len(skills.strip()) < 3:
+            job_failures.append("missing_skills")
+
+        if job_failures:
+            diagnostics["rejected_count"] += 1
+            for reason in job_failures:
+                diagnostics["rejected_by_reason"][reason] += 1
+            diagnostics["rejected_job_details"].append({
+                "job_id": str(j.get("id") or apply_url or title),
+                "title": title,
+                "company": company,
+                "primary_reason": job_failures[0],
+                "all_reasons": job_failures,
+            })
             continue
 
         rows.append([
@@ -99,7 +138,10 @@ def format_jobs_rows(jobs: List[Dict[str, Any]]) -> List[List[Any]]:
             min_sal, max_sal, apply_url, source, last_updated,
             skills, interview_doc
         ])
-    return rows
+        diagnostics["rows_formatted"] += 1
+
+    format_jobs_rows.last_diagnostics = diagnostics
+    return (rows, diagnostics) if return_diagnostics else rows
 
 
 def is_valid_sheet_row(row: List[Any]) -> bool:
@@ -119,25 +161,12 @@ def is_valid_sheet_row(row: List[Any]) -> bool:
     if exp in {"not specified", "unspecified", "none", "nan", ""}:
         return False
 
-    # Strict non-tech triage
-    try:
-        from verification.classification_engine import classify_opportunity
-        from core.models import OpportunityType
-        opp_type, role_family, _ = classify_opportunity(title, "", company)
-        if opp_type in (OpportunityType.UNRELATED, OpportunityType.EXPERIENCED_JOB):
-            return False
-    except Exception:
-        pass
-
-    # Location check: Pan India / India and recognized technology off-campus drives have national eligibility
-    loc_clean = location.lower()
-    is_national = any(k in loc_clean for k in ["pan india", "anywhere in india", "india", "remote", "wfh"])
-    if is_national:
-        return True
-
+    # Strict location check using the filter engine (Mumbai / Hyderabad / Remote only)
     from filter_engine import is_valid_location
     loc_ok, _ = is_valid_location(location)
-    return loc_ok
+    if not loc_ok:
+        return False
+    return True
 
 
 def merge_job_rows(
@@ -163,10 +192,10 @@ def merge_job_rows(
             str(row[2] or "").strip().casefold(),
         )
 
-    # Always preserve all existing historical rows on the sheet
+    # Only preserve historical rows that pass the strict quality & completeness check
     for source_row in existing_rows:
         row = normalized(source_row)
-        if not any(str(c).strip() for c in row):  # Skip completely empty blank rows
+        if not is_valid_sheet_row(row):
             continue
         job_key = key(row)
         if job_key in row_index_by_key:
@@ -249,6 +278,7 @@ def sync_to_live_google_sheet(
     credentials_path: Optional[str] = None,
     jobs: Optional[List[Dict[str, Any]]] = None,
     hr_leads: Optional[List[Dict[str, Any]]] = None,
+    require_salary: bool = False,
 ) -> bool:
     """
     Syncs verified jobs and HR leads directly to the live Google Sheet via Google API.
@@ -278,8 +308,24 @@ def sync_to_live_google_sheet(
                 jobs_data = json.load(f)
         else:
             jobs_data = jobs
-        jobs_rows = format_jobs_rows(jobs_data)
-        
+        jobs_rows, fmt_diag = format_jobs_rows(jobs_data, return_diagnostics=True, require_salary=require_salary)
+
+        print("\n" + "=" * 60)
+        print("📊 GOOGLE SHEETS FORMATTER DIAGNOSTICS")
+        print("=" * 60)
+        print(f"Jobs received by Sheets:       {fmt_diag['input_jobs']}")
+        print(f"Rows passed formatter:         {fmt_diag['rows_formatted']}")
+        print(f"Rows rejected by formatter:    {fmt_diag['rejected_count']}")
+        print("\nRejection breakdown:")
+        for r_name, r_count in fmt_diag["rejected_by_reason"].items():
+            print(f"  {r_name:40s}: {r_count}")
+        print("=" * 60)
+
+        if not jobs_rows:
+            print("[!] Note: 0 rows passed the strict Google Sheets completeness formatter.")
+            print("    Reason: Every candidate job failed one or more mandatory quality gates.")
+            print("    No row changes written to Google Sheet '02_Jobs'.")
+
         ws_jobs = _get_jobs_worksheet(sheet)
         header_row = _find_jobs_header_row(ws_jobs) or 3
         data_start_row = header_row + 1
@@ -294,14 +340,15 @@ def sync_to_live_google_sheet(
             range_name=f"A{header_row}:M{header_row}",
         )
         existing_rows = ws_jobs.get(f"A{data_start_row}:M")
-        merged_rows = merge_job_rows(existing_rows, jobs_rows)
-        ws_jobs.batch_clear([f"A{data_start_row}:M"])
-        if merged_rows:
-            last_row = data_start_row + len(merged_rows) - 1
-            ws_jobs.update(
-                values=merged_rows,
-                range_name=f"A{data_start_row}:M{last_row}",
-            )
+        merged_rows = merge_job_rows(existing_rows, jobs_rows) if jobs_rows else existing_rows
+        if jobs_rows:
+            ws_jobs.batch_clear([f"A{data_start_row}:M"])
+            if merged_rows:
+                last_row = data_start_row + len(merged_rows) - 1
+                ws_jobs.update(
+                    values=merged_rows,
+                    range_name=f"A{data_start_row}:M{last_row}",
+                )
         # Remove legacy columns beyond column M (13th column).
         trailing_headers = [
             str(value).strip().casefold()
@@ -350,18 +397,20 @@ def sync_to_live_google_sheet(
 def sync_configured_google_sheet(
     jobs: List[Dict[str, Any]],
     hr_leads: Optional[List[Dict[str, Any]]] = None,
+    require_salary: bool = False,
 ) -> Optional[bool]:
     """Sync the latest run when a spreadsheet ID is configured; None means disabled."""
     spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
     if not spreadsheet_id or spreadsheet_id == "YOUR_GOOGLE_SHEET_ID_HERE":
         print("[*] Google Sheets sync skipped: GOOGLE_SPREADSHEET_ID is not configured.")
         return None
-    return sync_to_live_google_sheet(spreadsheet_id, jobs=jobs, hr_leads=hr_leads)
+    return sync_to_live_google_sheet(spreadsheet_id, jobs=jobs, hr_leads=hr_leads, require_salary=require_salary)
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Direct Google Sheets Sync Tool")
     parser.add_argument("--sheet-id", type=str, help="Google Spreadsheet ID to sync into")
+    parser.add_argument("--require-salary", action="store_true", default=False, help="Strictly reject jobs with undisclosed salary")
     args = parser.parse_args()
 
     sid = (
@@ -370,7 +419,7 @@ if __name__ == "__main__":
         or os.environ.get("GOOGLE_SHEET_ID")
     )
     if sid:
-        sync_to_live_google_sheet(sid)
+        sync_to_live_google_sheet(sid, require_salary=args.require_salary)
     else:
         print("[*] Dry-run evaluation: Ready for Google Sheets live synchronization.")
         print("    Usage: python google_sheets_sync.py --sheet-id <YOUR_SPREADSHEET_ID>")

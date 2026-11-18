@@ -72,10 +72,13 @@
     ],
     "careers_url": "https://careers.cognizant.com/global/en",
     "ats_platform": "WORKDAY",
+    "ats_tenant_identifier": "cognizant",
     "public_api_endpoint": null,
     "official_domains": [
       "cognizant.com",
-      "careers.cognizant.com"
+      "careers.cognizant.com",
+      "app.joinsuperset.com",
+      "joinsuperset.com"
     ]
   },
   {
@@ -375,9 +378,12 @@
     ],
     "careers_url": "https://cgi.njoyn.com",
     "ats_platform": "NJOYN",
+    "ats_tenant_identifier": "cgi",
+    "ats_board_url": "https://cgi.njoyn.com",
     "public_api_endpoint": null,
     "official_domains": [
-      "cgi.com"
+      "cgi.com",
+      "cgi.njoyn.com"
     ]
   },
   {
@@ -394,6 +400,22 @@
     "official_domains": [
       "natwestgroup.com",
       "jobs.natwestgroup.com"
+    ]
+  },
+  {
+    "company_id": "ltts",
+    "name": "L&T Technology Services",
+    "aliases": [
+      "LTTS",
+      "Larsen & Toubro Technology Services",
+      "L&T"
+    ],
+    "careers_url": "https://www.ltts.com/careers",
+    "ats_platform": "DIRECT",
+    "public_api_endpoint": null,
+    "official_domains": [
+      "ltts.com",
+      "lnttechservices.com"
     ]
   }
 ]

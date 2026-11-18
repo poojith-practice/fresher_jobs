@@ -10,8 +10,8 @@ Strict verification pipeline that ensures:
 
 import math
 import re
-from datetime import datetime, date, timedelta
-from typing import Tuple, Optional, Dict, Any, List
+from datetime import datetime, date, timedelta, time
+from typing import Tuple, Optional, Dict, Any, List, Union
 
 from config import (
     MAX_HOURS_OLD,
@@ -31,75 +31,274 @@ def _text(value: Any) -> str:
     return "" if text.lower() in {"nan", "none", "nat"} else text
 
 
-def parse_date_posted(date_val: Any) -> Optional[datetime]:
+class DatePrecision:
+    EXACT_TIMESTAMP = "exact_timestamp"
+    DATE_ONLY = "date_only"
+    RELATIVE_DATE = "relative_date"
+    UNKNOWN = "unknown"
+
+
+class DateParseResult:
+    """
+    Structured date parsing result preserving date precision and time intervals.
+    Unpacks as (datetime, precision) for tuple compatibility, while also
+    providing direct attribute access (.dt, .precision, .interval).
+    """
+
+    def __init__(
+        self,
+        dt: Optional[datetime],
+        precision: str,
+        interval: Optional[Tuple[datetime, datetime]] = None,
+    ):
+        self.dt = dt
+        self.precision = precision
+        self.interval = interval
+
+    def __iter__(self):
+        yield self.dt
+        yield self.precision
+
+    def __getitem__(self, index):
+        if index == 0:
+            return self.dt
+        elif index == 1:
+            return self.precision
+        raise IndexError("Index out of range for DateParseResult")
+
+    def __eq__(self, other):
+        if other is None:
+            return self.dt is None
+        if isinstance(other, datetime):
+            return self.dt == other
+        if isinstance(other, tuple) and len(other) == 2:
+            return (self.dt, self.precision) == other
+        return super().__eq__(other)
+
+    def __repr__(self):
+        return f"DateParseResult(dt={self.dt}, precision='{self.precision}', interval={self.interval})"
+
+
+def parse_date_posted(
+    date_val: Any,
+    return_precision: bool = False,
+    now: Optional[datetime] = None,
+) -> Union[Optional[datetime], DateParseResult]:
     """
     Parses various date_posted formats from LinkedIn, Indeed, and Naukri
-    into a standardized Python datetime object.
+    into a standardized Python datetime object with precision metadata.
+
+    Preserves whether the timestamp is an exact datetime, a calendar-date interval
+    (date_only), or a relative string (relative_date). Never invents an exact midnight
+    timestamp as the definite posting time for a date-only entry.
     """
     if date_val is None:
         return None
 
+    ref_now = now or datetime.now()
+
+    # 1. Exact datetime object
     if isinstance(date_val, datetime):
-        return date_val
-
-    if isinstance(date_val, date):
-        return datetime.combine(date_val, datetime.min.time())
-
-    val_str = str(date_val).strip().lower()
-    now = datetime.now()
-
-    # Relative date patterns
-    if "just posted" in val_str or "today" in val_str or "hour" in val_str:
-        return now
-    elif "yesterday" in val_str:
-        return now - timedelta(days=1)
-
-    # e.g. "1 day ago", "2 days ago"
-    days_match = re.search(r"(\d+)\s+day", val_str)
-    if days_match:
-        days = int(days_match.group(1))
-        return now - timedelta(days=days)
-
-    # e.g. "1 week ago"
-    weeks_match = re.search(r"(\d+)\s+week", val_str)
-    if weeks_match:
-        weeks = int(weeks_match.group(1))
-        return now - timedelta(weeks=weeks)
-
-    # Try full ISO format (preserves hours/minutes/seconds)
-    try:
-        dt = datetime.fromisoformat(val_str.replace("z", "+00:00"))
+        dt = date_val
         if dt.tzinfo is not None:
             dt = dt.astimezone().replace(tzinfo=None)
-        return dt
-    except Exception:
-        pass
+        res = DateParseResult(dt=dt, precision=DatePrecision.EXACT_TIMESTAMP)
+        return (res.dt, res.precision) if return_precision else res
 
-    # Standard date formats: YYYY-MM-DD
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
-        for sub in (val_str[:19], val_str[:10]):
+    # 2. Calendar date object (date-only)
+    if isinstance(date_val, date) and not isinstance(date_val, datetime):
+        # A date-only posting represents the entire 24-hour interval [00:00:00, 23:59:59.999999]
+        d_start = datetime.combine(date_val, time.min)
+        d_end = datetime.combine(date_val, time.max)
+        # Conservative dt: latest possible time on that date (avoids false age inflation)
+        res = DateParseResult(
+            dt=d_end,
+            precision=DatePrecision.DATE_ONLY,
+            interval=(d_start, d_end),
+        )
+        return (res.dt, res.precision) if return_precision else res
+
+    val_str = str(date_val).strip()
+    if not val_str or val_str.lower() in {"nan", "nat", "none", "null"}:
+        return None
+
+    val_lower = val_str.lower()
+
+    # 3. Relative date patterns
+    if "just posted" in val_lower or val_lower == "today":
+        d_start = datetime.combine(ref_now.date(), time.min)
+        res = DateParseResult(
+            dt=ref_now,
+            precision=DatePrecision.RELATIVE_DATE,
+            interval=(d_start, ref_now),
+        )
+        return (res.dt, res.precision) if return_precision else res
+
+    hour_match = re.search(r"(\d+)\s+hour", val_lower)
+    if hour_match:
+        hours = int(hour_match.group(1))
+        dt = ref_now - timedelta(hours=hours)
+        res = DateParseResult(dt=dt, precision=DatePrecision.RELATIVE_DATE)
+        return (res.dt, res.precision) if return_precision else res
+
+    minute_match = re.search(r"(\d+)\s+minute", val_lower)
+    if minute_match:
+        mins = int(minute_match.group(1))
+        dt = ref_now - timedelta(minutes=mins)
+        res = DateParseResult(dt=dt, precision=DatePrecision.RELATIVE_DATE)
+        return (res.dt, res.precision) if return_precision else res
+
+    if "yesterday" in val_lower:
+        yesterday_date = ref_now.date() - timedelta(days=1)
+        d_start = datetime.combine(yesterday_date, time.min)
+        d_end = datetime.combine(yesterday_date, time.max)
+        res = DateParseResult(
+            dt=d_end,
+            precision=DatePrecision.RELATIVE_DATE,
+            interval=(d_start, d_end),
+        )
+        return (res.dt, res.precision) if return_precision else res
+
+    days_match = re.search(r"(\d+)\s+day", val_lower)
+    if days_match:
+        days = int(days_match.group(1))
+        target_date = ref_now.date() - timedelta(days=days)
+        d_start = datetime.combine(target_date, time.min)
+        d_end = datetime.combine(target_date, time.max)
+        res = DateParseResult(
+            dt=d_end,
+            precision=DatePrecision.RELATIVE_DATE,
+            interval=(d_start, d_end),
+        )
+        return (res.dt, res.precision) if return_precision else res
+
+    weeks_match = re.search(r"(\d+)\s+week", val_lower)
+    if weeks_match:
+        weeks = int(weeks_match.group(1))
+        target_date = ref_now.date() - timedelta(weeks=weeks)
+        d_start = datetime.combine(target_date, time.min)
+        d_end = datetime.combine(target_date, time.max)
+        res = DateParseResult(
+            dt=d_end,
+            precision=DatePrecision.RELATIVE_DATE,
+            interval=(d_start, d_end),
+        )
+        return (res.dt, res.precision) if return_precision else res
+
+    # 4. Try full ISO / formatted timestamp WITH time component
+    if any(c in val_str for c in ("T", " ", ":")):
+        try:
+            dt = datetime.fromisoformat(val_str.replace("Z", "+00:00").replace("z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone().replace(tzinfo=None)
+            res = DateParseResult(dt=dt, precision=DatePrecision.EXACT_TIMESTAMP)
+            return (res.dt, res.precision) if return_precision else res
+        except Exception:
+            pass
+
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%d-%m-%Y %H:%M:%S"):
             try:
-                return datetime.strptime(sub, fmt)
+                dt = datetime.strptime(val_str[:19], fmt)
+                res = DateParseResult(dt=dt, precision=DatePrecision.EXACT_TIMESTAMP)
+                return (res.dt, res.precision) if return_precision else res
             except (ValueError, IndexError):
                 pass
+
+    # 5. Date-only strings: YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            parsed_d = datetime.strptime(val_str[:10], fmt).date()
+            d_start = datetime.combine(parsed_d, time.min)
+            d_end = datetime.combine(parsed_d, time.max)
+            res = DateParseResult(
+                dt=d_end,
+                precision=DatePrecision.DATE_ONLY,
+                interval=(d_start, d_end),
+            )
+            return (res.dt, res.precision) if return_precision else res
+        except (ValueError, IndexError):
+            pass
 
     return None
 
 
-def is_within_hours(date_val: Any, max_hours: int = MAX_HOURS_OLD) -> Tuple[bool, str]:
+def is_within_hours(
+    date_val: Any,
+    max_hours: int = MAX_HOURS_OLD,
+    now: Optional[datetime] = None,
+) -> Tuple[bool, str]:
     """
-    Verifies if a job was posted within the allowed hours limit (default: 48h).
+    Verifies if a job was posted within the allowed hours limit.
+    Correctly distinguishes exact timestamps, date-only intervals, and relative dates.
+
+    Date-only freshness policy:
+    A date-only posting represents a calendar-date interval [date 00:00:00, date 23:59:59.999999].
+    Because the board omitted the exact time, we do not fabricate midnight or penalize the posting.
+    Instead, we determine whether the possible posting-time interval overlaps the configured
+    freshness window [now - max_hours, now].
+    If the date is in the future, it is rejected as invalid.
+    If the interval's latest possible time (23:59:59) is older than (now - max_hours), it is rejected as too old.
+    If the interval overlaps the freshness window, it is accepted with date_only precision.
     """
-    parsed_date = parse_date_posted(date_val)
-    if parsed_date is None:
+    ref_now = now or datetime.now()
+    parsed_res = parse_date_posted(date_val, now=ref_now)
+    if parsed_res is None or (isinstance(parsed_res, DateParseResult) and parsed_res.dt is None):
         return False, "Posting date unavailable; cannot verify freshness"
 
-    age_hours = (datetime.now() - parsed_date).total_seconds() / 3600.0
+    if isinstance(parsed_res, DateParseResult):
+        precision = parsed_res.precision
+        parsed_dt = parsed_res.dt
+        interval = parsed_res.interval
+    else:
+        parsed_dt = parsed_res
+        precision = DatePrecision.EXACT_TIMESTAMP
+        interval = None
+
+    # Handle interval-based evaluations (date_only or relative date with interval)
+    if interval is not None:
+        int_start, int_end = interval
+
+        # Future date check
+        if int_start > ref_now:
+            return False, f"Future posting date ({date_val}); invalid date"
+
+        window_start = ref_now - timedelta(hours=max_hours)
+        window_end = ref_now
+
+        # If latest possible posting time is older than window start -> definitely too old
+        if int_end < window_start:
+            min_age_hours = (ref_now - int_end).total_seconds() / 3600.0
+            return (
+                False,
+                f"Too old: date-only posting ({date_val}) latest possible time was {min_age_hours:.1f}h ago "
+                f"(> {max_hours}h limit; {precision} precision)",
+            )
+
+        # Interval overlaps [window_start, window_end]
+        if int_end >= window_start and int_start <= window_end:
+            min_age = max(0.0, (ref_now - int_end).total_seconds() / 3600.0)
+            max_age = (ref_now - int_start).total_seconds() / 3600.0
+            return (
+                True,
+                f"Date-only posting ({date_val}) overlaps {max_hours}h freshness window "
+                f"(possible age {min_age:.1f}h to {max_age:.1f}h; {precision} precision)",
+            )
+
+        return False, f"Posting date ({date_val}) outside {max_hours}h freshness window"
+
+    # Exact timestamp evaluation
+    if parsed_dt.tzinfo is not None:
+        parsed_dt = parsed_dt.astimezone().replace(tzinfo=None)
+
+    age_hours = (ref_now - parsed_dt).total_seconds() / 3600.0
+
+    if age_hours < 0:
+        return False, f"Future posting timestamp ({parsed_dt}); invalid date"
 
     if age_hours <= max_hours:
-        return True, f"Posted {age_hours:.1f}h ago (within {max_hours}h limit)"
+        return True, f"Posted {age_hours:.1f}h ago (within {max_hours}h limit; {precision} precision)"
     else:
-        return False, f"Too old: posted {age_hours:.1f}h ago (> {max_hours}h limit)"
+        return False, f"Too old: posted {age_hours:.1f}h ago (> {max_hours}h limit; {precision} precision)"
 
 
 def _has_location_token(text: str, token: str) -> bool:
@@ -676,94 +875,32 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
     return job
 
 
-def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
+def evaluate_job(job: Dict[str, Any], max_hours: Optional[int] = None) -> Dict[str, Any]:
     """
     Runs the complete evaluation suite on a single job record.
     Returns the enriched job record with validation flags.
     Enforces that all fields (title, company, location, category, experience, apply URL)
     are strictly valid and complete.
     """
-    title = str(job.get("title") or "")
-    company = str(job.get("company") or "")
-    location = str(job.get("location") or "")
+    title = job.get("title")
+    company = job.get("company")
+    location = job.get("location")
     date_posted = job.get("date_posted")
-    desc = str(job.get("description") or "")
+    desc = job.get("description")
     level = job.get("job_level")
-
-    # -------------------------------------------------------------
-    # 0. STRICT NON-TECH & ROLE FAMILY TRIAGE GATE
-    # -------------------------------------------------------------
-    from verification.classification_engine import classify_opportunity
-    from core.models import OpportunityType
-    opp_type, role_family, class_reasons = classify_opportunity(
-        title=title,
-        description=desc,
-        company=company,
-    )
-    if opp_type == OpportunityType.UNRELATED:
-        job["is_valid_fresher_job"] = False
-        job["rejection_reason"] = f"Non-tech / non-software role: {'; '.join(class_reasons)}"
-        job["quality_score"] = 0
-        return job
-    elif opp_type == OpportunityType.EXPERIENCED_JOB:
-        job["is_valid_fresher_job"] = False
-        job["rejection_reason"] = f"Experienced / senior role: {'; '.join(class_reasons)}"
-        job["quality_score"] = 0
-        return job
-
-    # -------------------------------------------------------------
-    # 0b. REVERSE EMPLOYER DOMAIN & INTEGRITY CHECK
-    # -------------------------------------------------------------
-    from verification.company_verifier import verify_company_authenticity
-    from models.verification_result import CompanyAuthenticity
-    apply_url_probe = resolve_apply_url(job)
-    comp_status, comp_pos, comp_contras = verify_company_authenticity(
-        company=company,
-        apply_url=apply_url_probe,
-        text_content=desc,
-    )
-    if comp_status in (CompanyAuthenticity.FRAUDULENT, CompanyAuthenticity.SUSPICIOUS) or any(
-        "scam" in c.lower() or "fee" in c.lower() or "mismatch" in c.lower() for c in comp_contras
-    ):
-        job["is_valid_fresher_job"] = False
-        job["rejection_reason"] = f"Recruitment integrity contradiction: {'; '.join(comp_contras)}"
-        job["quality_score"] = 0
-        return job
-
-    # -------------------------------------------------------------
-    # 0c. APPLICATION DEADLINE CHECK
-    # -------------------------------------------------------------
-    from verification.application_verifier import verify_application_deadline
-    from core.models import DeadlineStatus
-    deadline_st, app_st, parsed_dl, dl_rejections = verify_application_deadline(
-        deadline_str=job.get("deadline"),
-        text_content=f"{title} {desc}",
-    )
-    if deadline_st == DeadlineStatus.EXPIRED:
-        job["is_valid_fresher_job"] = False
-        job["rejection_reason"] = "Registration deadline expired"
-        job["quality_score"] = 0
-        return job
 
     # Run tests
     job = enrich_experience_and_salary(job)
     experience = job.get("experience_range")
 
-    within_48h, date_reason = is_within_hours(date_posted, MAX_HOURS_OLD)
+    effective_max_hours = max_hours or job.get("hours_old") or MAX_HOURS_OLD
+    within_freshness, date_reason = is_within_hours(date_posted, effective_max_hours)
+    job["date_freshness_verified"] = within_freshness
+    job["date_freshness_reason"] = date_reason
+
     fresher_ok, exp_reason = is_fresher_job(title, experience, desc, level)
     legit_ok, legit_reason = is_legitimate_company(company, title, desc)
-
-    # Location check: Off-campus drives and explicit national roles have national eligibility
-    loc_clean = location.strip().lower()
-    is_national = (
-        opp_type in (OpportunityType.OFF_CAMPUS_DRIVE, OpportunityType.GRADUATE_PROGRAM)
-        or loc_clean in ("india", "pan india", "anywhere in india", "remote", "work from home", "wfh")
-    )
-    if is_national:
-        loc_ok = True
-        loc_reason = "Valid national / off-campus drive location"
-    else:
-        loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
+    loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
 
     # Resolve apply URL
     apply_url = resolve_apply_url(job)
@@ -773,21 +910,17 @@ def evaluate_job(job: Dict[str, Any]) -> Dict[str, Any]:
     # Strictly disallow "Not specified" / "Unspecified" experience
     has_valid_exp = bool(experience and str(experience).strip().lower() not in {"not specified", "unspecified", "none", "nan"})
 
-    if opp_type in (OpportunityType.OFF_CAMPUS_DRIVE, OpportunityType.GRADUATE_PROGRAM):
-        category = role_family
-        has_valid_cat = True
-    else:
-        category = categorize_role(title, desc)
-        has_valid_cat = bool(category)
-        if not category:
-            category = "Unmatched Tech Role"
+    category = categorize_role(title, desc)
+    has_valid_cat = bool(category)
+    if not category:
+        category = "Unmatched Tech Role"
 
     job["tech_category"] = category
 
-    is_valid = within_48h and fresher_ok and legit_ok and loc_ok and has_valid_cat and has_valid_url and has_valid_exp
+    is_valid = within_freshness and fresher_ok and legit_ok and loc_ok and has_valid_cat and has_valid_url and has_valid_exp
     rejection_reasons = []
 
-    if not within_48h:
+    if not within_freshness:
         rejection_reasons.append(date_reason)
     if not fresher_ok:
         rejection_reasons.append(exp_reason)

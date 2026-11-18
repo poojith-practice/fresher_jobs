@@ -42,9 +42,20 @@ from filter_engine import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("FresherJobScraper")
 _LINKEDIN_LOCK = RLock()
+_LINKEDIN_RATE_LIMITED: bool = False
 # Cache guest-endpoint descriptions for the current process so a rate-limited
 # or repeated card does not cost another HTTP request during the same run.
 _LINKEDIN_DESCRIPTION_CACHE: Dict[str, str] = {}
+
+
+def reset_linkedin_run_counters() -> None:
+    """
+    Resets the LinkedIn rate-limited flag and description cache for a new scraping run.
+    Ensures per-run isolation so earlier runs do not permanently lock out LinkedIn.
+    """
+    global _LINKEDIN_RATE_LIMITED
+    with _LINKEDIN_LOCK:
+        _LINKEDIN_RATE_LIMITED = False
 
 
 class EntryLevelNaukri(Naukri):
@@ -113,10 +124,16 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
     """
     Hydrates full job description for candidate LinkedIn jobs via LinkedIn guest endpoint.
     Guarantees that explicit experience requirements in JD (e.g. 1-3 yrs, 5+ yrs) are captured.
+    Stops immediately if a 429 rate limit is encountered.
     """
     import re
     import requests
     from bs4 import BeautifulSoup
+
+    global _LINKEDIN_RATE_LIMITED
+    with _LINKEDIN_LOCK:
+        if _LINKEDIN_RATE_LIMITED:
+            return
 
     effective_url = safe_str(raw_job.get("job_url_direct") or raw_job.get("job_url") or raw_job.get("id"))
     jid_match = re.search(r"(\d{8,12})", effective_url)
@@ -152,7 +169,9 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
                 _LINKEDIN_DESCRIPTION_CACHE[jid] = desc_text
                 raw_job["description"] = desc_text
         elif resp.status_code == 429:
-            logger.warning("LinkedIn guest endpoint rate-limited (HTTP 429) for job %s", jid)
+            logger.warning("LinkedIn guest endpoint rate-limited (HTTP 429) for job %s. Stopping further LinkedIn requests.", jid)
+            with _LINKEDIN_LOCK:
+                _LINKEDIN_RATE_LIMITED = True
     except Exception as exc:
         logger.debug("LinkedIn description fetch failed for %s: %s", jid, exc)
 
@@ -201,20 +220,31 @@ def run_scraping_query(
             if site == "linkedin":
                 # Polite board serialization to eliminate 429 rate limit errors
                 with _LINKEDIN_LOCK:
+                    if _LINKEDIN_RATE_LIMITED:
+                        logger.info("Skipping LinkedIn query for %s (%s): rate-limited on earlier request", search_term, location)
+                        return site, pd.DataFrame(), "Skipped: LinkedIn rate-limited (HTTP 429)"
                     time.sleep(1.5)
                     df = call()
             else:
                 df = call()
             errors = (getattr(df, "attrs", {}) or {}).get("errors", {})
             if site in errors:
-                logger.warning("JobSpy reported %s failure for %s: %s", site, search_term, errors[site])
+                err_str = str(errors[site])
+                logger.warning("JobSpy reported %s failure for %s: %s", site, search_term, err_str)
+                if site == "linkedin" and any(x in err_str.lower() for x in ("429", "rate limit", "too many requests")):
+                    with _LINKEDIN_LOCK:
+                        _LINKEDIN_RATE_LIMITED = True
             warnings = (getattr(df, "attrs", {}) or {}).get("warnings", {})
             if site in warnings:
                 logger.warning("JobSpy warning for %s: %s", site, warnings[site])
             return site, df, str(errors[site]) if site in errors else None
         except Exception as exc:
-            logger.warning("Scraper failed for %s (%s, %s): %s", site, search_term, location, exc)
-            return site, pd.DataFrame(), str(exc)
+            exc_str = str(exc)
+            logger.warning("Scraper failed for %s (%s, %s): %s", site, search_term, location, exc_str)
+            if site == "linkedin" and any(x in exc_str.lower() for x in ("429", "rate limit", "too many requests")):
+                with _LINKEDIN_LOCK:
+                    _LINKEDIN_RATE_LIMITED = True
+            return site, pd.DataFrame(), exc_str
 
     if len(sites) > 1:
         with ThreadPoolExecutor(max_workers=len(sites)) as executor:
@@ -260,6 +290,8 @@ def scrape_fresher_jobs(
     # the same thing during scraping and during filtering.
     import filter_engine as _filter_engine
     _filter_engine.MAX_HOURS_OLD = hours_old
+
+    reset_linkedin_run_counters()
 
     all_raw_jobs: List[Dict[str, Any]] = []
     seen_urls = set()
@@ -398,7 +430,7 @@ def scrape_fresher_jobs(
         # 3. Hydrate description for candidate LinkedIn jobs that pass preliminary triage.
         # A short/empty description is exactly where LinkedIn hides the experience
         # requirement, so do not require a role-category match before hydrating.
-        if source == "linkedin" and len(safe_str(raw_job.get("description"))) < 150:
+        if source == "linkedin" and not _LINKEDIN_RATE_LIMITED and len(safe_str(raw_job.get("description"))) < 150:
             title_clean = safe_str(raw_job.get("title"))
             company_clean = safe_str(raw_job.get("company"))
             loc_clean = safe_str(raw_job.get("location"))
@@ -434,7 +466,7 @@ def scrape_fresher_jobs(
             and source in {"linkedin", "indeed"}
             and _only_missing_experience(evaluated)
         ):
-            if source == "linkedin" and len(safe_str(evaluated.get("description"))) < 150:
+            if source == "linkedin" and not _LINKEDIN_RATE_LIMITED and len(safe_str(evaluated.get("description"))) < 150:
                 hydrate_linkedin_description(evaluated, session=li_session)
                 time.sleep(0.5)
                 evaluated = evaluate_job(evaluated)

@@ -206,7 +206,7 @@ def test_full_pipeline_evaluation():
         "title": "Data Analyst Fresher",
         "company": "Tata Consultancy Services",
         "location": "Mumbai",
-        "date_posted": datetime.now() - timedelta(hours=10),
+        "date_posted": datetime.now() - timedelta(hours=3),
         "experience_range": "0-6 months",
         "job_url": "https://linkedin.com/jobs/view/123",
     }

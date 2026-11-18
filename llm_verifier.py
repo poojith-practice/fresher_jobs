@@ -473,6 +473,12 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
 
         if li_id:
             try:
+                import scraper
+                if getattr(scraper, "_LINKEDIN_RATE_LIMITED", False):
+                    return existing_desc
+            except Exception:
+                pass
+            try:
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept-Language": "en-US,en;q=0.9",
@@ -493,6 +499,12 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
                         clean_desc = desc_div.get_text(separator="\n", strip=True)
                         job["description"] = clean_desc
                         return clean_desc
+                elif res.status_code == 429:
+                    try:
+                        import scraper
+                        scraper._LINKEDIN_RATE_LIMITED = True
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.debug("LinkedIn hydration failed for %s: %s", li_id, e)
 
