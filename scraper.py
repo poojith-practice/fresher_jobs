@@ -190,6 +190,7 @@ def run_scraping_query(
     logger.info(f"Scraping -> Query: '{search_term}' | Location: '{location}' | Sites: {sites} | Hours: {hours_old}")
 
     def scrape_one_site(site: str) -> tuple[str, pd.DataFrame, Optional[str]]:
+        global _LINKEDIN_RATE_LIMITED
         try:
             if site in {"monsterindia", "foundit", "monster"}:
                 from foundit_scraper import scrape_foundit_jobs
