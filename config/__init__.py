@@ -24,7 +24,7 @@ from config.settings import (
 from config.sources import SOURCES_CONFIG
 
 # Also import and re-export legacy config attributes for backwards compatibility
-MAX_HOURS_OLD = 20
+MAX_HOURS_OLD = 6
 TARGET_SITES = ["naukri", "indeed", "linkedin", "monsterindia"]
 UNSUPPORTED_SITES = []
 DEFAULT_LOCATIONS = ["Mumbai", "Hyderabad"]
