@@ -23,6 +23,7 @@ langchain-openai>=0.1.0
 langchain-core>=0.2.0
 curl-cffi>=0.7.0
 beautifulsoup4>=4.12.0
+playwright>=1.40.0
 
 # Interview Prep Document Generator (Minimal PDF & Web Question Sourcing)
 reportlab>=4.0.0

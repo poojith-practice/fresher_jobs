@@ -45,6 +45,8 @@ jobs:
       GROQ_API_KEY2: ${{ secrets.GROQ_API_KEY2 || secrets.GROQ_API_KEY_2 }}
       GROQ_API_KEY3: ${{ secrets.GROQ_API_KEY3 || secrets.GROQ_API_KEY_3 }}
       GROQ_MODEL: "openai/gpt-oss-120b"
+      # RocketReach HR Recruiter Enrichment API Key
+      ROCKETREACH_API_KEY: ${{ secrets.ROCKETREACH_API_KEY || '1cfb3c5k109696672f1c5538929215d9ef473989' }}
 
     steps:
       - name: Verify Google Sheets secrets are configured
@@ -65,7 +67,9 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium || true
 
       - name: Create Google service-account key
         env:

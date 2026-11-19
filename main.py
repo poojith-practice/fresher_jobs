@@ -56,7 +56,7 @@ def parse_args():
         "--sites",
         nargs="+",
         default=TARGET_SITES,
-        help="Target job sites (e.g., --sites naukri linkedin indeed)",
+        help="Target job sites (e.g., --sites naukri linkedin indeed freshersdunia campusdrive)",
     )
     parser.add_argument(
         "--roles",
@@ -169,12 +169,12 @@ def main():
 
         # Reorder columns for clean reading
         priority_cols = [
-            "site", "tech_category", "title", "company", "location",
+            "site", "tech_category", "title", "company", "location", "venue_address",
             "date_posted", "experience_range", "experience_source", "verification_status",
             "llm_verified", "llm_eligible", "llm_experience_detected",
             "min_amount", "max_amount",
             "eligible_passout_years", "required_skills", "prior_experience_required", "job_requirement",
-            "job_url_direct", "job_url", "emails", "quality_score"
+            "job_url_direct", "job_url", "apply_url", "fallback_url", "link_health", "application_last_date", "emails", "quality_score"
         ]
         existing_priority = [c for c in priority_cols if c in df_valid.columns]
         other_cols = [c for c in df_valid.columns if c not in priority_cols]

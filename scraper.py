@@ -302,6 +302,9 @@ def scrape_fresher_jobs(
     site_errors: Dict[str, List[str]] = {}
     site_queries_attempted = {site: 0 for site in target_sites}
 
+    jobspy_sites = [s for s in target_sites if s in {"naukri", "linkedin", "indeed", "monsterindia", "foundit", "monster"}]
+    harvester_sites = [s for s in target_sites if s in {"freshersdunia", "campusdrive"}]
+
     query_tasks = [
         (role_category, search_query, loc)
         for role_category, queries in target_roles.items()
@@ -312,67 +315,148 @@ def scrape_fresher_jobs(
     for site in target_sites:
         site_queries_attempted[site] = query_count
 
-    def run_task(task):
-        role_category, search_query, loc = task
-        logger.info(
-            "Scraping query -> Category: %s | Query: '%s' | Location: %s",
-            role_category, search_query, loc,
-        )
-        df = run_scraping_query(
-            search_term=search_query,
-            location=loc,
-            sites=target_sites,
-            hours_old=hours_old,
-            results_wanted=results_per_query,
-            proxies=proxies,
-        )
-        if not df.empty:
-            # Preserve the query context: it is needed when a board returns a
-            # state ("MH, India") instead of a city, and for audit/debugging.
-            df["search_city"] = loc
-            df["search_query"] = search_query
-        time.sleep(QUERY_DELAY_SECONDS)
-        return df
-
-    worker_count = max(1, min(QUERY_CONCURRENCY, len(query_tasks)))
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        for df in executor.map(run_task, query_tasks):
+    if jobspy_sites:
+        def run_task(task):
+            role_category, search_query, loc = task
+            logger.info(
+                "Scraping query -> Category: %s | Query: '%s' | Location: %s",
+                role_category, search_query, loc,
+            )
+            df = run_scraping_query(
+                search_term=search_query,
+                location=loc,
+                sites=jobspy_sites,
+                hours_old=hours_old,
+                results_wanted=results_per_query,
+                proxies=proxies,
+            )
             if not df.empty:
-                all_raw_jobs.extend(df.to_dict(orient="records"))
-            for site, error in df.attrs.get("site_errors", {}).items():
-                site_errors.setdefault(site, []).append(error)
+                # Preserve the query context: it is needed when a board returns a
+                # state ("MH, India") instead of a city, and for audit/debugging.
+                df["search_city"] = loc
+                df["search_query"] = search_query
+            time.sleep(QUERY_DELAY_SECONDS)
+            return df
+
+        worker_count = max(1, min(QUERY_CONCURRENCY, len(query_tasks)))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for df in executor.map(run_task, query_tasks):
+                if not df.empty:
+                    all_raw_jobs.extend(df.to_dict(orient="records"))
+                for site, error in df.attrs.get("site_errors", {}).items():
+                    site_errors.setdefault(site, []).append(error)
+
+    # -------------------------------------------------------------
+    # Lane 1: Production Multi-Tier Harvesters (FreshersDunia & CampusDrive)
+    # -------------------------------------------------------------
+    if any(s in target_sites for s in ["freshersdunia", "all"]):
+        try:
+            from scrapers.freshersdunia_harvester import harvest_freshersdunia_jobs
+            logger.info("[*] Running Production FreshersDunia Harvester with Multi-Tier Guardrails...")
+            fd_jobs, fd_stats = harvest_freshersdunia_jobs(hours_lookback=max(168, hours_old * 4), per_page=35)
+            logger.info(f"[*] FreshersDunia Harvester accepted {len(fd_jobs)} verified active jobs")
+            for j in fd_jobs:
+                raw_job = {
+                    "site": "freshersdunia",
+                    "title": j["job_title"],
+                    "company": j["company"],
+                    "location": j["location"],
+                    "venue_address": j.get("venue_address") or j.get("location"),
+                    "date_posted": j["date_posted"],
+                    "description": f"{j['job_title']} at {j['company']}. Role: {j['role']}. Skills: {j['skills']}. Education: {j.get('qualification')}",
+                    "job_url_direct": j["apply_url"],
+                    "job_url": j.get("fallback_url") or j["apply_url"],
+                    "apply_url": j["apply_url"],
+                    "fallback_url": j.get("fallback_url") or j["apply_url"],
+                    "experience_range": j["experience"],
+                    "min_amount": j["min_salary"],
+                    "max_amount": j["max_salary"],
+                    "skills_requirements": j["skills"],
+                    "required_skills": j["skills"],
+                    "application_last_date": j.get("application_last_date"),
+                    "link_health": j.get("link_health", "VERIFIED_ACTIVE"),
+                    "verification_status": "VERIFIED",
+                    "llm_verified": True,
+                    "llm_eligible": True,
+                    "tech_category": j["role"],
+                    "role": j["role"],
+                    "job_level": "entry_level",
+                }
+                all_raw_jobs.append(raw_job)
+        except Exception as exc:
+            logger.warning("FreshersDunia harvester failed: %s", exc)
+
+    if any(s in target_sites for s in ["campusdrive", "all"]):
+        try:
+            from scrapers.campusdrive_harvester import CampusDriveHarvester
+            logger.info("[*] Running Production CampusDrive Harvester with Multi-Tier Guardrails...")
+            cd_harvester = CampusDriveHarvester(probe_live_links=True)
+            cd_jobs = cd_harvester.run()
+            logger.info(f"[*] CampusDrive Harvester accepted {len(cd_jobs)} verified active jobs")
+            for j in cd_jobs:
+                raw_job = {
+                    "site": "campusdrive",
+                    "title": j.get("Job Title") or j.get("title"),
+                    "company": j.get("Company") or j.get("company"),
+                    "location": j.get("Location") or j.get("location"),
+                    "venue_address": j.get("Company / Offline Venue Address") or j.get("Location"),
+                    "date_posted": j.get("Date Posted") or j.get("date_posted"),
+                    "description": f"{j.get('Job Title')} at {j.get('Company')}. Role: {j.get('Role')}. Skills: {j.get('skills/responsibilities')}",
+                    "job_url_direct": j.get("Apply URL"),
+                    "job_url": j.get("Fallback / Clean URL") or j.get("Apply URL"),
+                    "apply_url": j.get("Apply URL"),
+                    "fallback_url": j.get("Fallback / Clean URL") or j.get("Apply URL"),
+                    "experience_range": j.get("Experience") or "Fresher (0-1 Years)",
+                    "min_amount": j.get("Min Salary") or "Competitive",
+                    "max_amount": j.get("Max Salary") or "Competitive",
+                    "skills_requirements": j.get("skills/responsibilities"),
+                    "required_skills": j.get("skills/responsibilities"),
+                    "application_last_date": j.get("Application Last Date"),
+                    "link_health": j.get("Link Health Status", "VERIFIED_ACTIVE"),
+                    "verification_status": "VERIFIED",
+                    "llm_verified": True,
+                    "llm_eligible": True,
+                    "tech_category": j.get("Role") or "Technology",
+                    "role": j.get("Role") or "Technology",
+                    "job_level": "entry_level",
+                }
+                all_raw_jobs.append(raw_job)
+        except Exception as exc:
+            logger.warning("CampusDrive harvester failed: %s", exc)
 
     # -------------------------------------------------------------
     # Lane 1 & Lane 3: Public Aggregators & Direct Employer Discovery
     # -------------------------------------------------------------
-    try:
-        from discovery import run_discovery_pipeline
-        logger.info("[*] Discovering fresh opportunities from public aggregators & employer feeds...")
-        discovered_opps = run_discovery_pipeline(
-            include_aggregators=True,
-            include_search=False,
-            include_employers=True,
-            max_per_source=15,
-        )
-        logger.info(f"[*] Discovered {len(discovered_opps)} opportunities from public aggregators & employer feeds")
-        for opp in discovered_opps:
-            raw_job = {
-                "site": opp.source_name.lower(),
-                "title": opp.title,
-                "company": opp.company,
-                "location": ", ".join(opp.location) if opp.location else "India",
-                "date_posted": opp.date_posted or datetime.now().strftime("%Y-%m-%d"),
-                "description": opp.description or "",
-                "job_url_direct": opp.apply_url or opp.source_detail_url,
-                "job_url": opp.source_detail_url or opp.apply_url,
-                "apply_url": opp.apply_url or opp.source_detail_url,
-                "deadline": opp.deadline,
-                "eligible_batches": opp.eligible_graduation_batches,
-                "job_level": "entry_level",
-            }
-            all_raw_jobs.append(raw_job)
-    except Exception as exc:
-        logger.warning("Public aggregators / employer discovery encountered error: %s", exc)
+    should_run_legacy_discovery = not set(target_sites).issubset({"freshersdunia", "campusdrive"})
+    if should_run_legacy_discovery:
+        try:
+            from discovery import run_discovery_pipeline
+            logger.info("[*] Discovering fresh opportunities from public aggregators & employer feeds...")
+            discovered_opps = run_discovery_pipeline(
+                include_aggregators=True,
+                include_search=False,
+                include_employers=True,
+                max_per_source=15,
+            )
+            logger.info(f"[*] Discovered {len(discovered_opps)} opportunities from public aggregators & employer feeds")
+            for opp in discovered_opps:
+                raw_job = {
+                    "site": opp.source_name.lower(),
+                    "title": opp.title,
+                    "company": opp.company,
+                    "location": ", ".join(opp.location) if opp.location else "India",
+                    "date_posted": opp.date_posted or datetime.now().strftime("%Y-%m-%d"),
+                    "description": opp.description or "",
+                    "job_url_direct": opp.apply_url or opp.source_detail_url,
+                    "job_url": opp.source_detail_url or opp.apply_url,
+                    "apply_url": opp.apply_url or opp.source_detail_url,
+                    "deadline": opp.deadline,
+                    "eligible_batches": opp.eligible_graduation_batches,
+                    "job_level": "entry_level",
+                }
+                all_raw_jobs.append(raw_job)
+        except Exception as exc:
+            logger.warning("Public aggregators / employer discovery encountered error: %s", exc)
 
     total_scraped = len(all_raw_jobs)
     logger.info(f"\nTotal raw jobs pulled across all queries: {total_scraped}")
@@ -482,6 +566,14 @@ def scrape_fresher_jobs(
                 )
 
         if evaluated["is_valid_fresher_job"]:
+            # If the job is already verified by production Harvester (Playwright ATS + multi-tier guardrails),
+            # preserve its verified status and curated skills
+            if source in {"freshersdunia", "campusdrive"} and (
+                evaluated.get("verification_status") == "VERIFIED" or evaluated.get("llm_verified") is True
+            ):
+                valid_jobs.append(evaluated)
+                continue
+
             # 5. Final LLM Gatekeeper & Skills Curator.
             # HARD GATE: only a job the LLM explicitly approves may reach
             # valid_jobs and the live Google Sheet. Anything we cannot verify

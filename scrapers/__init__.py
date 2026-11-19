@@ -12,6 +12,8 @@ from scrapers.freshersdunia_scraper import FreshersDuniaScraper
 from scrapers.freshersnow_scraper import FreshersNowScraper
 from scrapers.prepinsta_scraper import PrepInstaScraper
 from scrapers.official_careers_scraper import OfficialCareersScraper
+from scrapers.campusdrive_harvester import CampusDriveHarvester
+from scrapers.freshersdunia_harvester import harvest_freshersdunia_jobs, ATSVerifier
 
 SCRAPER_REGISTRY = {
     "saarthi_drives": SaarthiScraper,
@@ -58,6 +60,9 @@ __all__ = [
     "HirastraScraper",
     "AmazonJobsScraper",
     "FreshersDuniaScraper",
+    "CampusDriveHarvester",
+    "harvest_freshersdunia_jobs",
+    "ATSVerifier",
     "FreshersNowScraper",
     "PrepInstaScraper",
     "OfficialCareersScraper",

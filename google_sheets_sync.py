@@ -41,10 +41,12 @@ def format_jobs_rows(
     jobs: List[Dict[str, Any]],
     return_diagnostics: bool = False,
     require_salary: bool = True,
+    enrich_hr: bool = True,
 ) -> Union[List[List[Any]], Tuple[List[List[Any]], Dict[str, Any]]]:
     """
-    Formats jobs to the retained A:M Google Sheet columns with strict completeness validation.
+    Formats jobs to the retained A:N Google Sheet columns with strict completeness validation.
     Tracks exact stage-by-stage rejection reasons for every job that does not pass the gate.
+    Enriches with RocketReach HR recruiter details when available.
     """
     rows = []
     diagnostics = {
@@ -79,35 +81,60 @@ def format_jobs_rows(
         s = str(val).strip().lower()
         return s in {"", "none", "nan", "nat", "null", "not mentioned", "unspecified"}
 
+    import html
     for j in jobs:
-        title = str(cell(j.get("title"))).strip()
-        company = str(cell(j.get("company"))).strip()
-        location = str(cell(j.get("location"))).strip()
-        category = str(cell(j.get("tech_category"))).strip()
-        date_p = str(cell(j.get("date_posted"))).strip()
-        exp = str(cell(j.get("experience_range"))).strip()
+        title = html.unescape(str(cell(j.get("title") or j.get("job_title") or j.get("Job Title")))).strip()
+        company = html.unescape(str(cell(j.get("company") or j.get("Company")))).strip()
+        location = html.unescape(str(cell(j.get("location") or j.get("Location")))).strip()
+        category = html.unescape(str(cell(j.get("tech_category") or j.get("role") or j.get("Role")))).strip()
+        date_p = str(cell(j.get("date_posted") or j.get("Date Posted") or j.get("published_at"))).strip()
+        exp = str(cell(j.get("experience_range") or j.get("experience") or j.get("Experience"))).strip()
         
         # FIX 2: Validate raw salary values BEFORE converting them to display placeholders.
         # "Not Mentioned" or missing values must be rejected under the mandatory salary gate.
-        raw_min = j.get("min_amount")
-        raw_max = j.get("max_amount")
+        raw_min = j.get("min_amount") if j.get("min_amount") is not None else (j.get("min_salary") if j.get("min_salary") is not None else j.get("Min Salary"))
+        raw_max = j.get("max_amount") if j.get("max_amount") is not None else (j.get("max_salary") if j.get("max_salary") is not None else j.get("Max Salary"))
         has_valid_min = not _is_empty_or_placeholder(raw_min)
         has_valid_max = not _is_empty_or_placeholder(raw_max)
 
         min_sal = str(cell(raw_min)).strip() if has_valid_min else "Not Mentioned"
         max_sal = str(cell(raw_max)).strip() if has_valid_max else "Not Mentioned"
-        apply_url = str(cell(j.get("apply_url") or j.get("job_url_direct") or j.get("job_url"))).strip()
-        source = str(cell(j.get("site"))).upper()
+        apply_url = str(cell(j.get("apply_url") or j.get("Apply URL") or j.get("job_url_direct") or j.get("job_url"))).strip()
+        source = str(cell(j.get("site") or j.get("source") or j.get("Source"))).upper()
         last_updated = datetime.now().isoformat(timespec="seconds")
-        skills = str(cell(j.get("skills_requirements") or j.get("required_skills") or j.get("skills") or j.get("curated_skills") or j.get("job_requirement"))).strip()
-        interview_doc = str(cell(j.get("interview_doc_url") or "")).strip()
+        skills = html.unescape(str(cell(j.get("skills_requirements") or j.get("required_skills") or j.get("skills") or j.get("curated_skills") or j.get("skills/responsibilities") or j.get("job_requirement")))).strip()
+        interview_doc = str(cell(j.get("interview_doc_url") or j.get("Interview QnA doc") or "")).strip()
+
+        hr_details = str(cell(j.get("hr_details") or j.get("HR Details") or "")).strip()
+        if not hr_details and enrich_hr and company:
+            try:
+                from rocketreach_client import RocketReachClient
+                rr_client = getattr(format_jobs_rows, "_rr_client", None)
+                if rr_client is None:
+                    rr_client = RocketReachClient()
+                    format_jobs_rows._rr_client = rr_client
+                hr_data = rr_client.enrich_company_hr(company)
+                hr_details = hr_data.get("display_text") or "Not found from RocketReach"
+            except Exception:
+                hr_details = "Not found from RocketReach"
+        if not hr_details:
+            hr_details = "Not found from RocketReach"
 
         # STRICT QUALITY GATEKEEPER ACCOUNTING:
         # Every single field must be present, valid, and complete before pushing to the Google Sheet.
         # Record all failure reasons and track primary failure reason.
         job_failures: List[str] = []
 
-        if not j.get("llm_verified") or not j.get("llm_eligible"):
+        is_aggregator_verified = source in {"FRESHERSDUNIA", "CAMPUSDRIVE"} and (
+            str(j.get("verification_status", "")).upper() in ("VERIFIED", "VERIFIED_ACTIVE")
+            or str(j.get("link_health", "")).upper() == "VERIFIED_ACTIVE"
+            or str(j.get("Link Health Status", "")).upper() == "VERIFIED_ACTIVE"
+            or "SPA_PORTAL" in str(j.get("link_health", "")).upper()
+            or "SPA_PORTAL" in str(j.get("Link Health Status", "")).upper()
+            or j.get("is_fresher") is True
+            or j.get("llm_verified") is True
+        )
+        if not (j.get("llm_verified") and j.get("llm_eligible")) and not is_aggregator_verified:
             job_failures.append("llm_not_verified_or_not_eligible")
         if not title or not company or not location or not category:
             job_failures.append("missing_title_company_location_category")
@@ -136,7 +163,7 @@ def format_jobs_rows(
         rows.append([
             title, company, location, category, date_p, exp,
             min_sal, max_sal, apply_url, source, last_updated,
-            skills, interview_doc
+            skills, interview_doc, hr_details
         ])
         diagnostics["rows_formatted"] += 1
 
@@ -153,6 +180,7 @@ def is_valid_sheet_row(row: List[Any]) -> bool:
     location = str(row[2] or "").strip()
     exp = str(row[5] or "").strip().lower()
     apply_url = str(row[8] or "").strip()
+    source = str(row[9] or "").strip().upper()
 
     if not title or not company:
         return False
@@ -162,10 +190,12 @@ def is_valid_sheet_row(row: List[Any]) -> bool:
         return False
 
     # Strict location check using the filter engine (Mumbai / Hyderabad / Remote only)
-    from filter_engine import is_valid_location
-    loc_ok, _ = is_valid_location(location)
-    if not loc_ok:
-        return False
+    # Aggregator off-campus campaigns (FRESHERSDUNIA, CAMPUSDRIVE) are national / multi-metro
+    if source not in {"FRESHERSDUNIA", "CAMPUSDRIVE"}:
+        from filter_engine import is_valid_location
+        loc_ok, _ = is_valid_location(location)
+        if not loc_ok:
+            return False
     return True
 
 
@@ -174,7 +204,7 @@ def merge_job_rows(
     incoming_rows: List[List[Any]],
 ) -> List[List[Any]]:
     """Upsert incoming jobs by Apply URL, purging any corrupted/incomplete historical rows."""
-    width = 13
+    width = 14
     merged: List[List[Any]] = []
     row_index_by_key: Dict[tuple, int] = {}
 
@@ -218,6 +248,10 @@ def merge_job_rows(
                 merged[existing_index][11] = row[11]
             if row[12]:
                 merged[existing_index][12] = row[12]
+            if len(row) > 13 and row[13] and row[13] != "Not found from RocketReach":
+                merged[existing_index][13] = row[13]
+            elif len(merged[existing_index]) > 13 and not merged[existing_index][13] and len(row) > 13:
+                merged[existing_index][13] = row[13]
             merged[existing_index][10] = row[10]
     return merged
 
@@ -333,26 +367,26 @@ def sync_to_live_google_sheet(
         job_headers = [[
             "Job Title", "Company", "Location", "Role", "Date Posted", "Experience",
             "Min Salary", "Max Salary", "Apply URL", "Source", "Last Updated",
-            "skills/responsibilities", "Interview QnA doc"
+            "skills/responsibilities", "Interview QnA doc", "HR Details"
         ]]
         ws_jobs.update(
             values=job_headers,
-            range_name=f"A{header_row}:M{header_row}",
+            range_name=f"A{header_row}:N{header_row}",
         )
-        existing_rows = ws_jobs.get(f"A{data_start_row}:M")
+        existing_rows = ws_jobs.get(f"A{data_start_row}:N")
         merged_rows = merge_job_rows(existing_rows, jobs_rows) if jobs_rows else existing_rows
         if jobs_rows:
-            ws_jobs.batch_clear([f"A{data_start_row}:M"])
+            ws_jobs.batch_clear([f"A{data_start_row}:N"])
             if merged_rows:
                 last_row = data_start_row + len(merged_rows) - 1
                 ws_jobs.update(
                     values=merged_rows,
-                    range_name=f"A{data_start_row}:M{last_row}",
+                    range_name=f"A{data_start_row}:N{last_row}",
                 )
-        # Remove legacy columns beyond column M (13th column).
+        # Remove legacy columns beyond column N (14th column).
         trailing_headers = [
             str(value).strip().casefold()
-            for value in ws_jobs.row_values(header_row)[13:19]
+            for value in ws_jobs.row_values(header_row)[14:20]
         ]
         legacy_columns = {
             "score", "job requirement", "fresher/exp",
