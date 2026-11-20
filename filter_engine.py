@@ -334,59 +334,61 @@ def is_valid_location(
     search_city: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
-    Verifies that the job is located in one of the target metros (Mumbai or Hyderabad),
-    their recognized metropolitan areas / tech corridors, or is explicitly Remote.
-    Rejects jobs exclusively in other cities (Noida, Pune, Gurgaon, Bangalore, Delhi, etc.).
-
-    `search_city` is used only when the board returns a state instead of a city
-    (for example Indeed's "MH, India" for a Mumbai search).
+    Verifies that the job is located in one of the target tech hubs in India,
+    their recognized metropolitan areas / tech corridors, or is explicitly Remote/Hybrid.
+    Rejects jobs exclusively in foreign countries.
     """
     loc_clean = _text(location).lower()
     if not loc_clean:
         return False, "Empty location"
 
-    search_city_clean = _text(search_city).lower()
-    state_only = re.fullmatch(r"(?:mh|maharashtra|ts|telangana)(?:,\s*india)?", loc_clean)
-    if state_only and search_city_clean:
-        if re.fullmatch(r"(?:mh|maharashtra)(?:,\s*india)?", loc_clean) and "mumbai" in search_city_clean:
-            return True, f"Valid target location: '{location}' (state-level card for Mumbai search)"
-        if re.fullmatch(r"(?:ts|telangana)(?:,\s*india)?", loc_clean) and "hyderabad" in search_city_clean:
-            return True, f"Valid target location: '{location}' (state-level card for Hyderabad search)"
+    # Reject foreign locations that are explicitly outside India
+    foreign_tokens = [
+        "united states", "usa", "u.s.", "united kingdom", "london", "dubai", "uae",
+        "singapore", "australia", "canada", "germany", "netherlands", "philippines"
+    ]
+    if any(_has_location_token(loc_clean, ft) for ft in foreign_tokens) and "india" not in loc_clean:
+        return False, f"Location '{location}' is in a foreign country outside India"
 
-    # Recognized Mumbai metropolitan tokens
-    mumbai_tokens = [
+    # If search_city was provided and matches state-level cards (e.g. Indeed's "MH, India", "KA, India")
+    search_city_clean = _text(search_city).lower()
+    if search_city_clean:
+        return True, f"Valid target location: '{location}' (matched search city '{search_city}')"
+
+    # Recognized Indian tech hub tokens across major tech corridors
+    tech_hub_tokens = [
+        # Mumbai Metropolitan Region
         "mumbai", "navi mumbai", "thane", "kalyan", "dombivli", "panvel", "bhiwandi",
         "mira bhayandar", "andheri", "bandra", "bkc", "kurla", "goregaon", "malad",
         "powai", "worli", "airoli", "vashi", "mahape", "ghansoli", "belapur", "mmr",
-        "mumbai metropolitan region", "mumbai (all areas)"
-    ]
-
-    # Recognized Hyderabad metropolitan tokens
-    hyderabad_tokens = [
+        "mumbai metropolitan region", "mumbai (all areas)", "maharashtra", "mh",
+        # Hyderabad
         "hyderabad", "secunderabad", "cyberabad", "telangana", "ts", "hitec city",
         "hitech city", "gachibowli", "madhapur", "kondapur", "kukatpally", "uppal",
         "begumpet", "banjara hills", "jubilee hills", "greater hyderabad area",
-        "hyderabad area", "hyderabad(all areas)"
+        "hyderabad area", "hyderabad(all areas)",
+        # Bangalore / Bengaluru
+        "bangalore", "bengaluru", "whitefield", "electronic city", "koramangala",
+        "indiranagar", "marathahalli", "bellandur", "hebbal", "manyata", "karnataka", "ka",
+        # Pune
+        "pune", "hinjewadi", "magarpatta", "kharadi", "vimannagar", "viman nagar", "baner",
+        "wakad", "hadapsar", "bhosari", "kothrud", "pcmc", "pimpri", "chinchwad",
+        # Delhi NCR
+        "gurgaon", "gurugram", "noida", "greater noida", "delhi", "new delhi", "delhi ncr",
+        "ncr", "faridabad", "ghaziabad", "haryana",
+        # Chennai
+        "chennai", "omr", "sholinganallur", "guindy", "taramani", "siruseri", "tamil nadu", "tn",
+        # Other Tech Cities
+        "kolkata", "ahmedabad", "kochi", "cochin", "chandigarh", "mohali", "indore", "jaipur",
+        "coimbatore", "trivandrum", "thiruvananthapuram", "bhubaneswar", "lucknow",
+        # Remote & Pan-India
+        "remote", "work from home", "wfh", "anywhere in india", "pan india", "pan-india", "all india", "hybrid"
     ]
 
-    is_mumbai = any(_has_location_token(loc_clean, tok) for tok in mumbai_tokens)
-    is_hyderabad = any(_has_location_token(loc_clean, tok) for tok in hyderabad_tokens)
-    is_remote = any(_has_location_token(loc_clean, r) for r in ["remote", "work from home", "wfh", "anywhere in india"])
-
-    if is_mumbai or is_hyderabad or is_remote:
+    if any(_has_location_token(loc_clean, tok) for tok in tech_hub_tokens):
         return True, f"Valid target location: '{location}'"
 
-    # Other non-target cities that must be rejected if Mumbai/Hyderabad is not present
-    disallowed_cities = [
-        "noida", "gurgaon", "gurugram", "delhi", "new delhi", "bengaluru", "bangalore",
-        "pune", "chennai", "kolkata", "ahmedabad", "jaipur", "chandigarh", "indore",
-        "kochi", "coimbatore", "bhubaneswar", "lucknow"
-    ]
-    for city in disallowed_cities:
-        if city in loc_clean:
-            return False, f"Location '{location}' is in '{city}', outside Mumbai/Hyderabad target regions"
-
-    return False, f"Location '{location}' does not match target metros (Mumbai / Hyderabad)"
+    return False, f"Location '{location}' is not a recognized Indian tech location"
 
 
 def resolve_apply_url(job: Dict[str, Any]) -> str:
@@ -580,11 +582,17 @@ def is_fresher_job(
     title_words = re.sub(r"[^\w\s]", " ", title_str)
     for keyword in FORBIDDEN_TITLE_KEYWORDS:
         clean_kw = re.sub(r"[^\w\s]", " ", keyword).strip()
-        if not clean_kw:
+        # Avoid single-character or numeric-only matching that could match numbers like 5 in '8.5 LPA' or '5S'
+        if not clean_kw or clean_kw.isdigit() or len(clean_kw) < 2:
             continue
         pattern = r"\b" + re.escape(clean_kw) + r"\b"
         if re.search(pattern, title_words):
             return False, f"Title contains senior/non-fresher keyword: '{keyword}'"
+
+    # Explicit senior experience requirements in title (e.g. '2+ years', '3+ yrs', '5+ yoe', '5 years exp')
+    senior_exp_in_title = re.search(r"\b([2-9]|\d{2})\s*\+?\s*(?:years?|yrs?|yoe)\b", title_str)
+    if senior_exp_in_title:
+        return False, f"Title specifies senior experience: '{senior_exp_in_title.group(0)}'"
 
     # 3. Check for Roman numerals or level numbers indicating experienced roles
     # e.g. "SW Engineer II", "SDE 2", "Developer III", "Analyst L2", "Level 2"
@@ -689,49 +697,94 @@ def is_legitimate_company(
 
 def categorize_role(title: Optional[str], description: Optional[str] = None) -> Optional[str]:
     """
-    Strictly maps the job title/description to one of the 5 target tracks requested.
-    Returns None if the job is not in the 5 requested positions.
+    Maps the job title/description to a recognized fresher track.
+    Returns None only if the job is completely unrelated to tech/analytics/business tracks.
     """
     title_clean = _text(title).lower()
     text = f"{title_clean} {_text(description)}".lower()
 
+    # 1. Marketing Analyst
     if "marketing" in title_clean and "analyst" in title_clean:
         return "Marketing Analyst"
-    elif any(k in title_clean for k in ["human resources analyst", "hr analyst", "people analyst"]):
+
+    # 2. HR Analyst
+    if any(k in title_clean for k in ["human resources analyst", "hr analyst", "people analyst"]):
         return "HR Analyst"
-    elif any(k in title_clean for k in ["data analytic", "data analyst", "power bi", "tableau", "sql analyst"]) or \
+
+    # 3. Data Analyst / BI
+    if any(k in title_clean for k in ["data analytic", "data analyst", "power bi", "tableau", "sql analyst", "business intelligence analyst", "bi analyst"]) or \
        ("data" in title_clean and "analyst" in title_clean):
         return "Data Analyst"
-    elif any(k in title_clean for k in ["business analytic", "business analyst", "bi analyst"]) or \
-         ("business" in title_clean and "analyst" in title_clean):
+
+    # 4. Business Analyst
+    if any(k in title_clean for k in ["business analytic", "business analyst", "product analyst", "operations analyst"]) or \
+       ("business" in title_clean and "analyst" in title_clean):
         return "Business Analyst"
-    elif any(k in title_clean for k in ["full stack", "fullstack", "mern", "mean stack"]):
+
+    # 5. Full Stack Developer
+    if any(k in title_clean for k in ["full stack", "fullstack", "mern", "mean stack"]):
         return "Full Stack Developer"
-    elif any(k in title_clean for k in ["web dev", "frontend", "front-end", "front end", "react", "node", "ui developer", "python web", "web developer"]):
+
+    # 6. Web / Frontend Developer
+    if any(k in title_clean for k in ["web dev", "frontend", "front-end", "front end", "react", "node", "ui developer", "python web", "web developer", "angular"]):
         return "Web Developer"
-    elif any(k in title_clean for k in ["software engineer trainee", "associate software engineer", "junior software engineer", "trainee software engineer", "software developer trainee"]):
+
+    # 7. QA / Testing / Quality Engineer
+    if any(k in title_clean for k in ["qa", "quality engineer", "test engineer", "software tester", "software test", "automation tester", "manual tester", "quality analyst", "testing", "sdet"]):
+        return "QA / Test Engineer"
+
+    # 8. Software Engineering / Development
+    if any(k in title_clean for k in [
+        "software engineer", "software developer", "associate software engineer", "junior software engineer",
+        "associate engineer", "trainee software engineer", "software developer trainee", "graduate engineer trainee",
+        "get", "sde", "programmer", "application developer", "python developer", "java developer", "backend developer",
+        "c++ developer", "cloud engineer", "devops engineer", "system engineer", "junior developer", "developer",
+        "sw development", "sw engineer", "sw developer", "sw development engineer"
+    ]):
         if any(w in text for w in ["web", "frontend", "react", "html", "ui"]):
             return "Web Developer"
-        return "Full Stack Developer"
-    elif "analyst" in title_clean and not any(x in title_clean for x in ["financial analyst", "equity analyst", "market research analyst", "credit analyst"]):
+        elif any(w in text for w in ["full stack", "fullstack", "mern"]):
+            return "Full Stack Developer"
+        return "Software Engineer"
+
+    # 9. Generic Analyst
+    if "analyst" in title_clean and not any(x in title_clean for x in ["financial analyst", "equity analyst", "market research analyst", "credit analyst"]):
         return "Analyst"
-    
-    # Secondary check on full description ONLY if title is generic trainee or associate
-    if any(w in title_clean for w in ["fresher", "trainee", "associate", "graduate"]):
+
+    # 10. Trainee / Graduate / Associate roles
+    if any(w in title_clean for w in ["graduate trainee", "management trainee", "tech trainee", "trainee", "associate"]):
+        if any(w in text for w in ["data", "analytics"]):
+            return "Data Analyst"
+        elif any(w in text for w in ["business", "operations"]):
+            return "Business Analyst"
+        elif any(w in text for w in ["qa", "test", "quality"]):
+            return "QA / Test Engineer"
+        elif any(w in text for w in ["web", "frontend", "react"]):
+            return "Web Developer"
+        elif any(w in text for w in ["software", "developer", "engineer", "programming", "java", "python"]):
+            return "Software Engineer"
+        return "Graduate Trainee"
+
+    # Secondary check on full description if title is generic
+    if any(w in title_clean for w in ["fresher", "trainee", "associate", "graduate", "engineer", "developer", "consultant"]):
         if "data analytic" in text or "data analyst" in text:
             return "Data Analyst"
         elif "business analyst" in text:
             return "Business Analyst"
-        elif any(k in text for k in ["full stack", "fullstack", "mern", "software engineer", "developer", "backend", "python", "java"]):
+        elif any(k in text for k in ["full stack", "fullstack", "mern"]):
             return "Full Stack Developer"
         elif any(k in text for k in ["web dev", "frontend", "react"]):
             return "Web Developer"
+        elif any(k in text for k in ["software engineer", "software developer", "coding", "python", "java"]):
+            return "Software Engineer"
+        elif any(k in text for k in ["qa", "testing", "quality"]):
+            return "QA / Test Engineer"
         elif "marketing" in text and "analyst" in text:
             return "Marketing Analyst"
         elif "hr" in text and "analyst" in text:
             return "HR Analyst"
         elif "analyst" in text:
-            return "Analyst" 
+            return "Analyst"
 
     return None
 
@@ -781,7 +834,13 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
         elif any(w in (title + " " + desc).lower() for w in ["fresher", "fresh graduate", "campus hiring", "2024 passout", "2025 passout", "2026 passout"]):
             exp = "0-1 Yrs (Fresher)"
             experience_source = "job_description"
-        elif any(w in title.lower() for w in ["junior", "trainee", "associate software engineer", "associate engineer", "associate developer", "associate analyst", "entry level", "entry-level", "intern"]):
+        elif any(w in title.lower() for w in [
+            "junior", "trainee", "associate software engineer", "associate engineer",
+            "associate developer", "associate analyst", "entry level", "entry-level",
+            "intern", "sde 1", "sde-1", "sde1", "graduate engineer trainee", "get",
+            "graduate trainee", "associate qa", "junior qa", "associate test engineer",
+            "sw development engineer 1", "sw development engineer i", "assistant",
+        ]):
             exp = "0-1 Yrs (Junior / Trainee)"
             experience_source = "title_inference"
         else:
@@ -900,50 +959,22 @@ def evaluate_job(job: Dict[str, Any], max_hours: Optional[int] = None) -> Dict[s
 
     fresher_ok, exp_reason = is_fresher_job(title, experience, desc, level)
     legit_ok, legit_reason = is_legitimate_company(company, title, desc)
-
-    source_lower = _text(job.get("site") or job.get("source")).lower()
-    is_aggregator_verified = source_lower in {"freshersdunia", "campusdrive"} and (
-        job.get("link_health") == "VERIFIED_ACTIVE"
-        or str(job.get("verification_status")).lower() == "verified"
-    )
-
-    if is_aggregator_verified:
-        within_freshness = True
-        date_reason = f"Aggregator campaign active deadline: {job.get('application_last_date', 'Open')}"
-        job["date_freshness_verified"] = True
-        job["date_freshness_reason"] = date_reason
-        fresher_ok = True
-        exp_reason = "Verified fresher campaign"
-        legit_ok = True
-        legit_reason = "Verified employer"
-        loc_ok = bool(location and str(location).strip())
-        loc_reason = f"Aggregator campaign location accepted: '{location}'"
-        category = job.get("tech_category") or job.get("role") or categorize_role(title, desc) or "Technology"
-        has_valid_cat = True
-        job["tech_category"] = category
-        has_valid_exp = True
-    else:
-        if source_lower in {"freshersdunia", "campusdrive"}:
-            loc_ok = bool(location and str(location).strip())
-            loc_reason = f"Aggregator campaign location accepted: '{location}'"
-        else:
-            loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
+    loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
 
     # Resolve apply URL
     apply_url = resolve_apply_url(job)
     job["apply_url"] = apply_url
     has_valid_url = bool(apply_url and apply_url.startswith("http"))
 
-    if not is_aggregator_verified:
-        # Strictly disallow "Not specified" / "Unspecified" experience
-        has_valid_exp = bool(experience and str(experience).strip().lower() not in {"not specified", "unspecified", "none", "nan"})
+    # Strictly disallow "Not specified" / "Unspecified" experience
+    has_valid_exp = bool(experience and str(experience).strip().lower() not in {"not specified", "unspecified", "none", "nan"})
 
-        category = categorize_role(title, desc)
-        has_valid_cat = bool(category)
-        if not category:
-            category = "Unmatched Tech Role"
+    category = categorize_role(title, desc)
+    has_valid_cat = bool(category)
+    if not category:
+        category = "Unmatched Tech Role"
 
-        job["tech_category"] = category
+    job["tech_category"] = category
 
     is_valid = within_freshness and fresher_ok and legit_ok and loc_ok and has_valid_cat and has_valid_url and has_valid_exp
     rejection_reasons = []

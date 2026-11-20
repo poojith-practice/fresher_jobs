@@ -24,10 +24,12 @@ from config.settings import (
 from config.sources import SOURCES_CONFIG
 
 # Also import and re-export legacy config attributes for backwards compatibility
-MAX_HOURS_OLD = 6
-TARGET_SITES = ["freshersdunia", "campusdrive", "naukri", "indeed", "linkedin", "monsterindia"]
+MAX_HOURS_OLD = 48
+TARGET_SITES = ["naukri", "indeed", "linkedin", "monsterindia"]
 UNSUPPORTED_SITES = []
-DEFAULT_LOCATIONS = ["Mumbai", "Hyderabad"]
+DEFAULT_LOCATIONS = [
+    "Bangalore", "Hyderabad", "Pune", "Mumbai", "Gurgaon", "Noida", "Chennai"
+]
 INDEED_COUNTRY = "india"
 RESULTS_PER_QUERY = 25
 QUERY_DELAY_SECONDS = 1.0
@@ -43,14 +45,18 @@ ROLE_QUERIES = {
     "Analyst": ["analyst", "junior analyst", "trainee analyst", "analyst fresher"],
     "Full Stack Developer": ["full stack developer", "junior full stack developer", "full stack developer fresher", "associate software engineer", "software engineer trainee"],
     "Web Developer": ["web developer", "junior web developer", "web developer fresher", "frontend developer fresher", "react developer fresher"],
+    "Software Engineer": ["software engineer fresher", "junior software engineer", "associate software engineer", "graduate engineer trainee", "junior software developer", "entry level software engineer"],
+    "QA Engineer": ["qa engineer fresher", "junior qa engineer", "software test engineer fresher", "quality assurance fresher", "junior tester"],
 }
 
+# Forbidden title keywords (indicates senior / experienced / non-fresher roles)
+# Note: Numeric experience ranges like '5+ years' are handled specifically via regex
+# in filter_engine.py to prevent false positives on salaries (e.g. '8.5 LPA') or '5S'.
 FORBIDDEN_TITLE_KEYWORDS = [
     "senior", "sr", "lead", "leader", "principal", "architect",
     "manager", "head", "director", "vp", "vice president", "specialist",
     "chief", "staff engineer", "expert", "consultant 2", "mid-level",
-    "mid level", "level 2", "level 3", "2+", "3+", "4+", "5+", "6+", "7+",
-    "8+", "9+", "10+", "years experience"
+    "mid level", "level 2", "level 3", "years experience"
 ]
 
 FORBIDDEN_JOB_LEVELS = ["mid_senior", "director", "executive", "associate_director"]

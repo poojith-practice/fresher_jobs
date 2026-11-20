@@ -1,21 +1,19 @@
 name: Fresher job scrape
 
 on:
-  # 11:00 and 16:00 IST.
-  # schedule:
-  #   - cron: "0 11 * * *"
-  #     timezone: "Asia/Kolkata"
-  #   - cron: "0 16 * * *"
-  #     timezone: "Asia/Kolkata"
+  # 11:00 AM and 04:00 PM IST (POSIX cron in UTC: 05:30 and 10:30 UTC)
+  schedule:
+    - cron: "30 5 * * *"
+    - cron: "30 10 * * *"
   workflow_dispatch:
     inputs:
       lookback_hours:
-        description: "Hours of job history to fetch (default: 20)"
+        description: "Hours of job history to fetch (default: 48)"
         required: true
         type: choice
-        default: "20"
+        default: "48"
         options:
-          - "20"
+          - "24"
           - "48"
 
 permissions:
@@ -87,13 +85,13 @@ jobs:
           Path("credentials.json").write_text(key, encoding="utf-8")
           PY
 
-      # - name: Run scheduled 20-hour scrape and sync
-      #   if: github.event_name == 'schedule'
-      #   run: python -u main.py --hours 20
-
-      - name: Run requested initial/manual scrape and sync
-        if: github.event_name == 'workflow_dispatch'
-        run: python -u main.py --hours "${{ inputs.lookback_hours }}"
+      - name: Run fresher job scraper pipeline
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python -u main.py --hours "${{ inputs.lookback_hours }}"
+          else
+            python -u main.py --hours 48
+          fi
 
       # This public repository's schedule can be disabled after 60 days without
       # repository activity. Record each successful run to keep it active.
@@ -107,3 +105,14 @@ jobs:
           git commit -m "Record successful scraper run"
           git pull --rebase origin main
           git push
+
+      - name: Upload scraper artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresher-jobs-run-${{ github.run_id }}
+          path: |
+            output/
+            run_report.json
+            run_report.md
+            canonical_jobs_latest.json

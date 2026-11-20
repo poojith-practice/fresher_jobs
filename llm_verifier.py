@@ -78,46 +78,13 @@ class RotatingLLM:
     def invoke(self, messages: Any, max_tokens: Optional[int] = None) -> Any:
         from langchain_openai import ChatOpenAI
 
-        # 1. Iterate through configured OpenRouter keys first (1 -> 2 -> 3)
-        while self.active_openrouter_idx < len(self.openrouter_keys):
-            curr_key = self.openrouter_keys[self.active_openrouter_idx]
-            key_id = f"OpenRouter Key #{self.active_openrouter_idx + 1}"
-            try:
-                client = ChatOpenAI(
-                    api_key=curr_key,
-                    base_url="https://openrouter.ai/api/v1",
-                    model=self.openrouter_model,
-                    temperature=0.1,
-                    max_tokens=max_tokens or 600,
-                    default_headers={
-                        "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
-                        "X-Title": "Fresher Job Intelligence Scraper",
-                    },
-                )
-                return client.invoke(messages)
-            except Exception as exc:
-                err_str = str(exc).lower()
-                is_quota_or_rate = any(
-                    x in err_str
-                    for x in [
-                        "429", "rate limit", "quota", "free-models-per-day",
-                        "limit exceeded", "credits", "invalid", "401", "403"
-                    ]
-                )
-                if is_quota_or_rate:
-                    logger.warning(
-                        "[%s] Rate-limited / quota / auth error: %s. Rotating to next OpenRouter key...",
-                        key_id, exc
-                    )
-                    self.active_openrouter_idx += 1
-                else:
-                    logger.warning("[%s] Request failed: %s. Rotating to next OpenRouter key...", key_id, exc)
-                    self.active_openrouter_idx += 1
+        def _extract_text(resp: Any) -> str:
+            content = getattr(resp, "content", resp)
+            if isinstance(content, (list, tuple)):
+                content = " ".join(str(p) for p in content)
+            return str(content or "").strip()
 
-        if self.openrouter_keys and self.active_openrouter_idx >= len(self.openrouter_keys):
-            logger.info("All %d configured OpenRouter keys exhausted. Shifting to Groq pool...", len(self.openrouter_keys))
-
-        # 2. Iterate through configured Groq keys as secondary fallback (1 -> 2 -> 3)
+        # 1. Iterate through configured Groq keys first (blazing fast LPU inference)
         while self.active_groq_idx < len(self.groq_keys):
             curr_key = self.groq_keys[self.active_groq_idx]
             key_id = f"Groq Key #{self.active_groq_idx + 1}"
@@ -129,7 +96,10 @@ class RotatingLLM:
                     temperature=0.1,
                     max_tokens=max_tokens or 600,
                 )
-                return client.invoke(messages)
+                res = client.invoke(messages)
+                if not _extract_text(res):
+                    raise ValueError("Groq returned empty response body")
+                return res
             except Exception as exc:
                 err_str = str(exc).lower()
                 is_quota_or_rate = any(
@@ -149,7 +119,49 @@ class RotatingLLM:
                     logger.warning("[%s] Request failed: %s. Rotating to next Groq key...", key_id, exc)
                     self.active_groq_idx += 1
 
-        raise RuntimeError("All configured OpenRouter and Groq keys have been exhausted!")
+        if self.groq_keys and self.active_groq_idx >= len(self.groq_keys):
+            logger.info("All %d configured Groq keys exhausted. Shifting to OpenRouter pool...", len(self.groq_keys))
+
+        # 2. Iterate through configured OpenRouter keys as secondary fallback (1 -> 2 -> 3)
+        while self.active_openrouter_idx < len(self.openrouter_keys):
+            curr_key = self.openrouter_keys[self.active_openrouter_idx]
+            key_id = f"OpenRouter Key #{self.active_openrouter_idx + 1}"
+            try:
+                client = ChatOpenAI(
+                    api_key=curr_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    model=self.openrouter_model,
+                    temperature=0.1,
+                    max_tokens=max_tokens or 600,
+                    default_headers={
+                        "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
+                        "X-Title": "Fresher Job Intelligence Scraper",
+                    },
+                )
+                res = client.invoke(messages)
+                if not _extract_text(res):
+                    raise ValueError("OpenRouter returned empty response body")
+                return res
+            except Exception as exc:
+                err_str = str(exc).lower()
+                is_quota_or_rate = any(
+                    x in err_str
+                    for x in [
+                        "429", "rate limit", "quota", "free-models-per-day",
+                        "limit exceeded", "credits", "invalid", "401", "403"
+                    ]
+                )
+                if is_quota_or_rate:
+                    logger.warning(
+                        "[%s] Rate-limited / quota / auth error: %s. Rotating to next OpenRouter key...",
+                        key_id, exc
+                    )
+                    self.active_openrouter_idx += 1
+                else:
+                    logger.warning("[%s] Request failed: %s. Rotating to next OpenRouter key...", key_id, exc)
+                    self.active_openrouter_idx += 1
+
+        raise RuntimeError("All configured Groq and OpenRouter keys have been exhausted!")
 
 
 def get_llm():
@@ -239,13 +251,9 @@ def extract_requirements_and_skills_context(description: str, max_chars: int = 3
     return extracted_text[:max_chars].strip()
 
 
-SYSTEM_GATEKEEPER_PROMPT = """Read the job description and decide whether this job is for a technology/software fresher (0-1 years, no prior professional experience) or whether it requires prior experience or is a non-technical role.
+SYSTEM_GATEKEEPER_PROMPT = """Read the job description and decide whether this job is for a fresher (0-1 years, no prior professional experience) or whether it requires prior experience.
 
-Strict negative constraints:
-1. Reject any non-technical roles: Reject culinary, cooking, chef, hospitality, pharmaceutical manufacturing, paint/chemical operations, manual maintenance, retail sales, BPO/voice/non-voice customer care, telecalling, video KYC, audio content evaluation, financial accounting/audit/FP&A, or back-office operations. Only genuine software/technology fresher roles (software engineering, web development, data engineering/analysis, QA/testing, DevOps, cloud engineering, or official technology campus recruitment drives) are eligible. If non-tech, set is_fresher_eligible: false and rejection_reason: "Non-technical role".
-2. Requirements like specialist tools (SAP, Salesforce, Oracle, Workday), "proficiency in ...", "experience in/with ...", senior scope, or owning client work mean prior experience.
-3. Freshers, 0-1 years, fresh graduate, trainee, or "no prior experience required" mean eligible only if in a technology/software role.
-4. If the description lists no requirements or qualifications at all (only company boilerplate or "as per JD"), or is unclear, return false.
+Requirements like specialist tools (SAP, Salesforce, Oracle, Workday), "proficiency in ...", "experience in/with ...", senior scope, or owning client work mean prior experience. Freshers, 0-1 years, fresh graduate, trainee, or "no prior experience required" mean eligible. If the description lists no requirements or qualifications at all (only company boilerplate or "as per JD"), or is unclear, return false.
 
 Return only this JSON:
 {
@@ -361,13 +369,23 @@ def verify_fresher_and_curate_skills(
         logger.warning("No LLM available for fresher verification; failing closed.")
         return {
             "is_fresher_eligible": False,
+            "is_valid_fresher": False,
             "llm_verified": False,
             "experience_detected": "LLM not configured",
             "rejection_reason": "LLM verification unavailable (no API keys configured)",
             "curated_skills": extract_fallback_skills(context, title=title),
         }
 
-    from langchain_core.messages import SystemMessage, HumanMessage
+    try:
+        from langchain_core.messages import SystemMessage, HumanMessage
+    except ImportError:
+        class SystemMessage:  # type: ignore[no-redef]
+            def __init__(self, content: str):
+                self.content = content
+
+        class HumanMessage:  # type: ignore[no-redef]
+            def __init__(self, content: str):
+                self.content = content
 
     user_content = f"Job Title: {title}\nCompany: {company}\n\nJob Description Excerpt:\n{context}"
     try:
@@ -375,7 +393,7 @@ def verify_fresher_and_curate_skills(
             SystemMessage(content=SYSTEM_GATEKEEPER_PROMPT),
             HumanMessage(content=user_content),
         ])
-        raw_text = response.content.strip()
+        raw_text = getattr(response, "content", str(response)).strip()
 
         # Extract JSON from response
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
@@ -403,6 +421,7 @@ def verify_fresher_and_curate_skills(
 
             return {
                 "is_fresher_eligible": is_eligible,
+                "is_valid_fresher": is_eligible,
                 "llm_verified": True,
                 "experience_detected": exp_det,
                 "rejection_reason": reason if not is_eligible else None,
@@ -413,6 +432,7 @@ def verify_fresher_and_curate_skills(
 
     return {
         "is_fresher_eligible": False,
+        "is_valid_fresher": False,
         "llm_verified": False,
         "experience_detected": "Evaluation failed",
         "rejection_reason": "LLM verification failed; job not verified",

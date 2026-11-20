@@ -97,13 +97,19 @@ def format_jobs_rows(
         has_valid_min = not _is_empty_or_placeholder(raw_min)
         has_valid_max = not _is_empty_or_placeholder(raw_max)
 
-        min_sal = str(cell(raw_min)).strip() if has_valid_min else "Not Mentioned"
-        max_sal = str(cell(raw_max)).strip() if has_valid_max else "Not Mentioned"
+        min_sal = str(cell(raw_min)).strip() if has_valid_min else "Not Disclosed"
+        max_sal = str(cell(raw_max)).strip() if has_valid_max else "Not Disclosed"
         apply_url = str(cell(j.get("apply_url") or j.get("Apply URL") or j.get("job_url_direct") or j.get("job_url"))).strip()
         source = str(cell(j.get("site") or j.get("source") or j.get("Source"))).upper()
         last_updated = datetime.now().isoformat(timespec="seconds")
         skills = html.unescape(str(cell(j.get("skills_requirements") or j.get("required_skills") or j.get("skills") or j.get("curated_skills") or j.get("skills/responsibilities") or j.get("job_requirement")))).strip()
         interview_doc = str(cell(j.get("interview_doc_url") or j.get("Interview QnA doc") or "")).strip()
+        if not interview_doc:
+            interview_doc = "Pending Generation"
+        if not date_p:
+            date_p = datetime.now().strftime("%Y-%m-%d")
+        if not skills or len(skills.strip()) < 3:
+            skills = "Technical skills and requirements detailed in job listing"
 
         hr_details = str(cell(j.get("hr_details") or j.get("HR Details") or "")).strip()
         if not hr_details and enrich_hr and company:

@@ -264,9 +264,19 @@ def run_interview_docs(
                 with open(meta_path, "r", encoding="utf-8") as f:
                     saved_meta = json.load(f)
                 if saved_meta.get("cache_key") == cache_key:
+                    existing_drive_url = saved_meta.get("drive_url")
+                    if not existing_drive_url:
+                        # Upload existing PDF to Google Drive if not yet uploaded
+                        drive_res = upload_pdf(pdf_path)
+                        existing_drive_url = drive_res.get("drive_url")
+                        if existing_drive_url:
+                            saved_meta["drive_url"] = existing_drive_url
+                            saved_meta["drive_file_id"] = drive_res.get("drive_file_id")
+                            with open(meta_path, "w", encoding="utf-8") as f:
+                                json.dump(saved_meta, f, indent=2)
                     logger.info(
-                        "[%d/%d] Using cached interview prep for %s @ %s",
-                        idx, len(job_list), role, company,
+                        "[%d/%d] Using cached interview prep for %s @ %s (Drive: %s)",
+                        idx, len(job_list), role, company, existing_drive_url or "none",
                     )
                     stats["cached"] += 1
                     stats["docs"].append({
@@ -275,8 +285,10 @@ def run_interview_docs(
                         "title": title,
                         "pdf_path": str(pdf_path),
                         "status": "cached",
-                        "drive_url": saved_meta.get("drive_url"),
+                        "drive_url": existing_drive_url,
                     })
+                    if existing_drive_url:
+                        job["interview_doc_url"] = existing_drive_url
                     continue
             except Exception as e:
                 logger.debug("Failed reading cache metadata for %s: %s", company, e)

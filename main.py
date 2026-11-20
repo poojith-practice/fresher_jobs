@@ -15,7 +15,8 @@ import os
 import sys
 import json
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 import pandas as pd
 
 # Ensure UTF-8 output in Windows cmd / powershell
@@ -34,6 +35,8 @@ from hr_enricher import process_hr_enrichment
 from history_store import HistoryStore
 from google_sheets_sync import sync_configured_google_sheet
 from excel_exporter import export_to_excel
+from core.run_status import RunReport, build_report_from_stats, OUTCOME_SUCCESS, OUTCOME_NO_JOBS
+from normalization.canonical_job import deduplicate, to_canonical
 
 
 def parse_args():
@@ -79,12 +82,25 @@ def parse_args():
     parser.add_argument(
         "--quick",
         action="store_true",
-        help="Quick run mode: scrapes 1 query per category with small limit for testing",
+        help="Quick run mode: scrapes 1 query per role with small limit for testing",
     )
     parser.add_argument(
         "--with-interview-docs",
+        dest="with_interview_docs",
         action="store_true",
-        help="Generate student-friendly interview prep PDFs for verified fresher jobs",
+        default=True,
+        help="Generate student-friendly interview prep PDFs and upload to Google Drive (default: True)",
+    )
+    parser.add_argument(
+        "--no-interview-docs",
+        dest="with_interview_docs",
+        action="store_false",
+        help="Disable interview prep generation and Drive upload",
+    )
+    parser.add_argument(
+        "--diagnostic-only",
+        action="store_true",
+        help="Diagnostic-only mode: runs scraping, filtering, and telemetry persistence, but skips Google Sheets sync and Drive upload.",
     )
     return parser.parse_args()
 
@@ -117,7 +133,7 @@ def main():
         results_limit = 5
 
     print("\n" + "=" * 70)
-    print(" 🚀 FRESHER JOB INTELLIGENCE SCRAPER (NAUKRI + LINKEDIN + INDEED)")
+    print("FRESHER JOB INTELLIGENCE SCRAPER (NAUKRI + LINKEDIN + INDEED)")
     print("=" * 70)
     print(f" • Max Job Age:       Last {args.hours} hours strictly")
     print(f" • Target Cities:      {', '.join(args.locations)}")
@@ -253,17 +269,36 @@ def main():
             json.dump([], f)
         print("\n[!] No jobs passed the strict fresher/freshness criteria in this cycle.")
 
-    # 2a. Upsert this run's jobs into the live sheet while retaining prior results.
-    synced = sync_configured_google_sheet(valid_jobs, hr_leads=hr_leads)
-    sync_failed = synced is False
-    if sync_failed:
-        print("[!] Google Sheets sync did not complete; local exports are still available.")
+    # 2a. Write run report + canonical job dedup evidence
+    report = build_report_from_stats(
+        stats,
+        started_at=stats.get("started_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    report_dir = Path(output_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report.write(report_dir, stem="run_report")
+    # Export canonical deduped jobs for downstream pipelines (n8n, Postgres)
+    if valid_jobs:
+        canonical_unique, dup_count = deduplicate(valid_jobs)
+        canonical_path = report_dir / "canonical_jobs_latest.json"
+        canonical_path.write_text(
+            json.dumps(canonical_unique, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    else:
+        canonical_path = report_dir / "canonical_jobs_latest.json"
+        canonical_path.write_text("[]", encoding="utf-8")
 
-    # 2b. Optionally generate Interview Preparation PDFs for verified fresher jobs
-    if getattr(args, "with_interview_docs", False) and valid_jobs:
+    # Replace the "no jobs passed" console message with the headline from the
+    # report so the UI is consistent with the machine-readable evidence.
+    if not valid_jobs and report.outcome == OUTCOME_NO_JOBS:
+        print(f"\n[!] {report.headline().split('—')[1].strip()}")
+
+    # 2a. Generate Interview Preparation PDFs & Google Drive links for verified fresher jobs
+    if getattr(args, "with_interview_docs", True) and valid_jobs and not getattr(args, "diagnostic_only", False):
         try:
             from interview_prep.runner import run_interview_docs
-            print("\n[*] Generating Interview Prep Documents for verified fresher jobs...")
+            print("\n[*] Generating Interview Prep Documents & Google Drive links for verified fresher jobs...")
             interview_dir = os.path.join(output_dir, "interview_docs")
             prep_stats = run_interview_docs(valid_jobs, output_base_dir=interview_dir)
             print(
@@ -272,6 +307,17 @@ def main():
             )
         except Exception as exc:
             print(f"[!] Interview prep generation encountered an error: {exc}")
+
+    # 2b. Upsert this run's jobs into the live sheet while retaining prior results.
+    if getattr(args, "diagnostic_only", False):
+        print("\n[✓] Diagnostic-only mode active: Google Sheets sync was completely skipped.")
+        synced = None
+        sync_failed = False
+    else:
+        synced = sync_configured_google_sheet(valid_jobs, hr_leads=hr_leads)
+        sync_failed = synced is False
+        if sync_failed:
+            print("[!] Google Sheets sync did not complete; local exports are still available.")
 
     # 2. Save Rejected Jobs Log (for transparency and audit)
     if rejected_jobs:
@@ -282,7 +328,7 @@ def main():
 
     # 3. Print Summary Stats
     print("\n" + "=" * 70)
-    print(" 📊 SCRAPING RUN SUMMARY")
+    print(" SCRAPING RUN SUMMARY")
     print("=" * 70)
     print(f" Total Duration:          {stats['duration_seconds']} seconds")
     print(f" Total Raw Listings:      {stats['total_raw_scraped']}")
@@ -328,8 +374,9 @@ def main():
             print(f"     Apply URL: {url}")
         print("\n" + "=" * 70)
 
-    if sync_failed:
-        raise SystemExit("Google Sheets synchronization failed.")
+    # Surface non-zero exit code only for genuine infrastructure failures.
+    if report and report.has_infrastructure_failure:
+        raise SystemExit(report.exit_code)
 
 
 if __name__ == "__main__":
