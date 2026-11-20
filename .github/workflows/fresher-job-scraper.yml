@@ -45,6 +45,9 @@ jobs:
       GROQ_MODEL: "openai/gpt-oss-120b"
       # RocketReach HR Recruiter Enrichment API Key
       ROCKETREACH_API_KEY: ${{ secrets.ROCKETREACH_API_KEY || '1cfb3c5k109696672f1c5538929215d9ef473989' }}
+      # Google Drive Upload Integration
+      GDRIVE_UPLOAD_URL: ${{ secrets.GDRIVE_UPLOAD_URL || 'https://script.google.com/macros/s/AKfycbxdnDqgef2bf570oe13cmFtZg819lmv8NQNQqyYky_-jhJFPq_WRHS0zOUmMVKts8Zlsg/exec' }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID || '10VvfeWYKf0fTVuihc8nWYSpeipVZwSiz' }}
 
     steps:
       - name: Verify Google Sheets secrets are configured
