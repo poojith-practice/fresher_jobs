@@ -703,6 +703,15 @@ def categorize_role(title: Optional[str], description: Optional[str] = None) -> 
     title_clean = _text(title).lower()
     text = f"{title_clean} {_text(description)}".lower()
 
+    # Reject non-tech, senior, or blacklisted titles immediately
+    title_words = re.sub(r"[^\w\s]", " ", title_clean)
+    for kw in FORBIDDEN_TITLE_KEYWORDS:
+        clean_kw = re.sub(r"[^\w\s]", " ", kw).strip()
+        if not clean_kw or clean_kw.isdigit() or len(clean_kw) < 2:
+            continue
+        if re.search(r"\b" + re.escape(clean_kw) + r"\b", title_words):
+            return None
+
     # 1. Marketing Analyst
     if "marketing" in title_clean and "analyst" in title_clean:
         return "Marketing Analyst"
@@ -729,11 +738,7 @@ def categorize_role(title: Optional[str], description: Optional[str] = None) -> 
     if any(k in title_clean for k in ["web dev", "frontend", "front-end", "front end", "react", "node", "ui developer", "python web", "web developer", "angular"]):
         return "Web Developer"
 
-    # 7. QA / Testing / Quality Engineer
-    if any(k in title_clean for k in ["qa", "quality engineer", "test engineer", "software tester", "software test", "automation tester", "manual tester", "quality analyst", "testing", "sdet"]):
-        return "QA / Test Engineer"
-
-    # 8. Software Engineering / Development
+    # 7. Software Engineering / Development
     if any(k in title_clean for k in [
         "software engineer", "software developer", "associate software engineer", "junior software engineer",
         "associate engineer", "trainee software engineer", "software developer trainee", "graduate engineer trainee",
@@ -747,23 +752,21 @@ def categorize_role(title: Optional[str], description: Optional[str] = None) -> 
             return "Full Stack Developer"
         return "Software Engineer"
 
-    # 9. Generic Analyst
+    # 8. Generic Analyst
     if "analyst" in title_clean and not any(x in title_clean for x in ["financial analyst", "equity analyst", "market research analyst", "credit analyst"]):
         return "Analyst"
 
-    # 10. Trainee / Graduate / Associate roles
+    # 9. Trainee / Graduate / Associate roles
     if any(w in title_clean for w in ["graduate trainee", "management trainee", "tech trainee", "trainee", "associate"]):
         if any(w in text for w in ["data", "analytics"]):
             return "Data Analyst"
-        elif any(w in text for w in ["business", "operations"]):
+        elif any(w in text for w in ["business analyst", "business operations", "bizops"]):
             return "Business Analyst"
-        elif any(w in text for w in ["qa", "test", "quality"]):
-            return "QA / Test Engineer"
         elif any(w in text for w in ["web", "frontend", "react"]):
             return "Web Developer"
-        elif any(w in text for w in ["software", "developer", "engineer", "programming", "java", "python"]):
+        elif any(w in text for w in ["software", "developer", "programmer", "programming", "coding", "java", "python", "backend"]):
             return "Software Engineer"
-        return "Graduate Trainee"
+        return None
 
     # Secondary check on full description if title is generic
     if any(w in title_clean for w in ["fresher", "trainee", "associate", "graduate", "engineer", "developer", "consultant"]):
@@ -777,8 +780,6 @@ def categorize_role(title: Optional[str], description: Optional[str] = None) -> 
             return "Web Developer"
         elif any(k in text for k in ["software engineer", "software developer", "coding", "python", "java"]):
             return "Software Engineer"
-        elif any(k in text for k in ["qa", "testing", "quality"]):
-            return "QA / Test Engineer"
         elif "marketing" in text and "analyst" in text:
             return "Marketing Analyst"
         elif "hr" in text and "analyst" in text:
@@ -838,7 +839,7 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
             "junior", "trainee", "associate software engineer", "associate engineer",
             "associate developer", "associate analyst", "entry level", "entry-level",
             "intern", "sde 1", "sde-1", "sde1", "graduate engineer trainee", "get",
-            "graduate trainee", "associate qa", "junior qa", "associate test engineer",
+            "graduate trainee",
             "sw development engineer 1", "sw development engineer i", "assistant",
         ]):
             exp = "0-1 Yrs (Junior / Trainee)"

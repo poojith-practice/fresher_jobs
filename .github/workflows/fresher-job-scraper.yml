@@ -42,7 +42,7 @@ jobs:
       GROQ_API_KEY1: ${{ secrets.GROQ_API_KEY1 || secrets.GROQ_API_KEY_1 }}
       GROQ_API_KEY2: ${{ secrets.GROQ_API_KEY2 || secrets.GROQ_API_KEY_2 }}
       GROQ_API_KEY3: ${{ secrets.GROQ_API_KEY3 || secrets.GROQ_API_KEY_3 }}
-      GROQ_MODEL: "openai/gpt-oss-120b"
+      GROQ_MODEL: "openai/gpt-oss-20b"
       # RocketReach HR Recruiter Enrichment API Key
       ROCKETREACH_API_KEY: ${{ secrets.ROCKETREACH_API_KEY || '1cfb3c5k109696672f1c5538929215d9ef473989' }}
       # Google Drive Upload Integration

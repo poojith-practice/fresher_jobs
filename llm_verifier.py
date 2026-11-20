@@ -62,6 +62,9 @@ class RotatingLLM:
     Multi-provider, multi-key rotating LLM client with automatic failover.
     Sequentially rotates through OpenRouter keys (1 -> 2 -> 3) first.
     If all OpenRouter keys are exhausted, seamlessly falls back to Groq keys (1 -> 2 -> 3).
+    When an API key encounters rate limits, errors, or timeouts on a job, it DOES NOT abandon
+    the job: it immediately retries the EXACT SAME JOB with the next active key until success
+    or all available provider keys are exhausted.
     """
 
     def __init__(self):
@@ -69,8 +72,10 @@ class RotatingLLM:
         self.groq_keys = get_groq_keys()
         self.active_openrouter_idx = 0
         self.active_groq_idx = 0
-        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free")
-        self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+        self.openrouter_exhausted = False
+        self.groq_exhausted = False
+        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
+        self.groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
     def has_keys(self) -> bool:
         return bool(self.openrouter_keys or self.groq_keys)
@@ -84,84 +89,75 @@ class RotatingLLM:
                 content = " ".join(str(p) for p in content)
             return str(content or "").strip()
 
-        # 1. Iterate through configured Groq keys first (blazing fast LPU inference)
-        while self.active_groq_idx < len(self.groq_keys):
-            curr_key = self.groq_keys[self.active_groq_idx]
-            key_id = f"Groq Key #{self.active_groq_idx + 1}"
-            try:
-                client = ChatOpenAI(
-                    api_key=curr_key,
-                    base_url="https://api.groq.com/openai/v1",
-                    model=self.groq_model,
-                    temperature=0.1,
-                    max_tokens=max_tokens or 600,
-                )
-                res = client.invoke(messages)
-                if not _extract_text(res):
-                    raise ValueError("Groq returned empty response body")
-                return res
-            except Exception as exc:
-                err_str = str(exc).lower()
-                is_quota_or_rate = any(
-                    x in err_str
-                    for x in [
-                        "429", "rate limit", "quota", "limit exceeded",
-                        "tokens per minute", "requests per minute", "invalid_api_key", "403"
-                    ]
-                )
-                if is_quota_or_rate:
+        last_exception = None
+
+        # 1. Iterate through configured OpenRouter keys first (1 -> 2 -> 3)
+        if self.openrouter_keys and not self.openrouter_exhausted:
+            start_idx = self.active_openrouter_idx % len(self.openrouter_keys)
+            for attempt in range(len(self.openrouter_keys)):
+                idx = (start_idx + attempt) % len(self.openrouter_keys)
+                curr_key = self.openrouter_keys[idx]
+                key_id = f"OpenRouter Key #{idx + 1}"
+                try:
+                    client = ChatOpenAI(
+                        api_key=curr_key,
+                        base_url="https://openrouter.ai/api/v1",
+                        model=self.openrouter_model,
+                        temperature=0.1,
+                        max_tokens=max_tokens or 350,
+                        default_headers={
+                            "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
+                            "X-Title": "Fresher Job Intelligence Scraper",
+                        },
+                    )
+                    res = client.invoke(messages)
+                    if not _extract_text(res):
+                        raise ValueError("OpenRouter returned empty response body")
+                    self.active_openrouter_idx = idx
+                    return res
+                except Exception as exc:
+                    last_exception = exc
                     logger.warning(
-                        "[%s] Rate-limited / quota exhausted: %s. Rotating to next Groq key...",
+                        "[%s] Request failed: %s. Retrying same job with next key...",
                         key_id, exc
                     )
-                    self.active_groq_idx += 1
-                else:
-                    logger.warning("[%s] Request failed: %s. Rotating to next Groq key...", key_id, exc)
-                    self.active_groq_idx += 1
+                    self.active_openrouter_idx = (idx + 1) % len(self.openrouter_keys)
 
-        if self.groq_keys and self.active_groq_idx >= len(self.groq_keys):
-            logger.info("All %d configured Groq keys exhausted. Shifting to OpenRouter pool...", len(self.groq_keys))
+            logger.info("All %d configured OpenRouter keys exhausted. Shifting to Groq pool...", len(self.openrouter_keys))
+            self.openrouter_exhausted = True
 
-        # 2. Iterate through configured OpenRouter keys as secondary fallback (1 -> 2 -> 3)
-        while self.active_openrouter_idx < len(self.openrouter_keys):
-            curr_key = self.openrouter_keys[self.active_openrouter_idx]
-            key_id = f"OpenRouter Key #{self.active_openrouter_idx + 1}"
-            try:
-                client = ChatOpenAI(
-                    api_key=curr_key,
-                    base_url="https://openrouter.ai/api/v1",
-                    model=self.openrouter_model,
-                    temperature=0.1,
-                    max_tokens=max_tokens or 600,
-                    default_headers={
-                        "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
-                        "X-Title": "Fresher Job Intelligence Scraper",
-                    },
-                )
-                res = client.invoke(messages)
-                if not _extract_text(res):
-                    raise ValueError("OpenRouter returned empty response body")
-                return res
-            except Exception as exc:
-                err_str = str(exc).lower()
-                is_quota_or_rate = any(
-                    x in err_str
-                    for x in [
-                        "429", "rate limit", "quota", "free-models-per-day",
-                        "limit exceeded", "credits", "invalid", "401", "403"
-                    ]
-                )
-                if is_quota_or_rate:
+        # 2. Iterate through configured Groq keys as fallback (1 -> 2 -> 3)
+        if self.groq_keys and not self.groq_exhausted:
+            start_idx = self.active_groq_idx % len(self.groq_keys)
+            for attempt in range(len(self.groq_keys)):
+                idx = (start_idx + attempt) % len(self.groq_keys)
+                curr_key = self.groq_keys[idx]
+                key_id = f"Groq Key #{idx + 1}"
+                try:
+                    client = ChatOpenAI(
+                        api_key=curr_key,
+                        base_url="https://api.groq.com/openai/v1",
+                        model=self.groq_model,
+                        temperature=0.1,
+                        max_tokens=max_tokens or 350,
+                    )
+                    res = client.invoke(messages)
+                    if not _extract_text(res):
+                        raise ValueError("Groq returned empty response body")
+                    self.active_groq_idx = idx
+                    return res
+                except Exception as exc:
+                    last_exception = exc
                     logger.warning(
-                        "[%s] Rate-limited / quota / auth error: %s. Rotating to next OpenRouter key...",
+                        "[%s] Request failed: %s. Retrying same job with next key...",
                         key_id, exc
                     )
-                    self.active_openrouter_idx += 1
-                else:
-                    logger.warning("[%s] Request failed: %s. Rotating to next OpenRouter key...", key_id, exc)
-                    self.active_openrouter_idx += 1
+                    self.active_groq_idx = (idx + 1) % len(self.groq_keys)
 
-        raise RuntimeError("All configured Groq and OpenRouter keys have been exhausted!")
+            logger.info("All %d configured Groq keys exhausted.", len(self.groq_keys))
+            self.groq_exhausted = True
+
+        raise RuntimeError(f"All configured OpenRouter and Groq keys have been exhausted for this job! Last error: {last_exception}")
 
 
 def get_llm():
@@ -251,16 +247,30 @@ def extract_requirements_and_skills_context(description: str, max_chars: int = 3
     return extracted_text[:max_chars].strip()
 
 
-SYSTEM_GATEKEEPER_PROMPT = """Read the job description and decide whether this job is for a fresher (0-1 years, no prior professional experience) or whether it requires prior experience.
+SYSTEM_GATEKEEPER_PROMPT = """You are a strict technical job gatekeeper for fresher IT hiring.
+Evaluate the job title and description on TWO strict conditions:
 
-Requirements like specialist tools (SAP, Salesforce, Oracle, Workday), "proficiency in ...", "experience in/with ...", senior scope, or owning client work mean prior experience. Freshers, 0-1 years, fresh graduate, trainee, or "no prior experience required" mean eligible. If the description lists no requirements or qualifications at all (only company boilerplate or "as per JD"), or is unclear, return false.
+1. FRESHER ELIGIBLE (0-1 years):
+- True if the job is for freshers, 0-1 years exp, entry-level, fresh graduates, or requires no prior professional work.
+- False if it requires >1 year experience, specialist tool mastery (e.g. 3+ yrs SAP, Salesforce, Oracle), senior scope, or previous full-time industry experience.
 
-Return only this JSON:
+2. LEGITIMATE SOFTWARE / TECH ROLE:
+- True ONLY if the role is in Software Engineering, Web/Full-stack Development, Data Analytics, BI, Machine Learning, or IT/Technical Business Analyst.
+- False if the role is NON-TECH or unrelated engineering:
+  * Plant, factory, industrial operations, shift operators, machine operators, water treatment/systems, boiler, maintenance.
+  * Diploma engineering, ITI, mechanical, civil, electrical hardware, site engineering, construction, welder, fitter, machinist.
+  * Telecalling, telemarketing, BPO, voice process, call center, customer care/support executive, physical sales, non-IT data entry.
+  * Non-tech business operations or non-technical trainees.
+
+If the description has no clear tech responsibilities/skills or is vague, return false.
+
+Return ONLY this raw JSON (no other text):
 {
   "is_fresher_eligible": true or false,
+  "is_software_or_tech_role": true or false,
   "experience_detected": "decisive evidence from the description",
-  "rejection_reason": "short reason, or null",
-  "curated_skills": "concrete tools/skills only, comma separated"
+  "rejection_reason": "short reason if either condition is false, or null if both true",
+  "curated_skills": "concrete technical tools/skills only (e.g. Python, SQL, React), comma separated"
 }
 """
 
@@ -299,7 +309,6 @@ def extract_fallback_skills(text: str, title: str = "", role: str = "") -> str:
         ("KYC/AML", r"\bkyc\b|\baml\b"),
         ("Requirements Gathering", r"\brequirement[s]?\s+gathering\b"),
         ("BRD/FRD", r"\bbrd\b|\bfrd\b"),
-        ("Quality Assurance", r"\bqa\b|\bquality\s+assurance\b|\btesting\b"),
     ]
 
     for label, pattern in tech_keywords:
@@ -318,8 +327,6 @@ def extract_fallback_skills(text: str, title: str = "", role: str = "") -> str:
         return "Requirements Gathering, BRD/FRD, Advanced Excel, Process Modeling, Agile, JIRA"
     elif "tax" in t_lower or "accounting" in t_lower or "finance" in t_lower:
         return "Financial Reporting, Tax Compliance, Advanced Excel, General Ledger, Auditing"
-    elif "qa" in t_lower or "quality" in t_lower or "test" in t_lower:
-        return "Manual Testing, Test Cases, Quality Assurance, JIRA, Bug Tracking, Regression Testing"
     else:
         return "Analytical Problem Solving, Microsoft Excel, Data Validation, Reporting, Process Documentation"
 
@@ -399,7 +406,9 @@ def verify_fresher_and_curate_skills(
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
-            is_eligible = _as_bool(data.get("is_fresher_eligible"), default=False)
+            is_fresher = _as_bool(data.get("is_fresher_eligible"), default=False)
+            is_tech = _as_bool(data.get("is_software_or_tech_role"), default=True) if "is_software_or_tech_role" in data else True
+            is_eligible = is_fresher and is_tech
 
             skills_val = data.get("curated_skills", "")
             if isinstance(skills_val, list):
@@ -418,9 +427,14 @@ def verify_fresher_and_curate_skills(
 
             exp_det = str(data.get("experience_detected", "") or "").strip()
             reason = data.get("rejection_reason")
+            if not is_tech and not reason:
+                reason = "Role is non-technical / not software, web, or data engineering"
+            elif not is_fresher and not reason:
+                reason = "Role requires prior experience (>1 year)"
 
             return {
                 "is_fresher_eligible": is_eligible,
+                "is_software_or_tech_role": is_tech,
                 "is_valid_fresher": is_eligible,
                 "llm_verified": True,
                 "experience_detected": exp_det,

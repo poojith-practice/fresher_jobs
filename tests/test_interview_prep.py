@@ -179,7 +179,9 @@ def test_pdf_rendering_creates_valid_pdf(tmp_path):
     assert rendered.stat().st_size > 1000  # non-empty PDF
 
 
-def test_drive_placeholders(tmp_path):
+def test_drive_placeholders(monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_UPLOAD_URL", raising=False)
+    monkeypatch.delenv("GDRIVE_FOLDER_ID", raising=False)
     assert drive_configured() is False
     dummy_pdf = tmp_path / "doc.pdf"
     dummy_pdf.write_bytes(b"%PDF-1.4 test")

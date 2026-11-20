@@ -54,8 +54,6 @@ TARGET_ROLE_CATEGORIES = [
     "HR Analyst",
     "Data Scientist",
     "Machine Learning Engineer",
-    "QA Engineer",
-    "Software Tester",
     "Graduate Engineer Trainee",
     "Associate Software Engineer",
 ]
