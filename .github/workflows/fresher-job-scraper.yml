@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       lookback_hours:
-        description: "Hours of job history to fetch (default: 48)"
-        required: true
+        description: "Hours of job history to fetch (default: 24)"
+        required: false
         type: choice
-        default: "48"
+        default: "24"
         options:
           - "24"
           - "48"

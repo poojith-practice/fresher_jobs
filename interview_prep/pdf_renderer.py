@@ -319,13 +319,12 @@ def _strategic_prep_flow(pack: Dict[str, Any]) -> List[Any]:
     flow: List[Any] = []
     top_5 = pack.get("top_5_questions_to_prepare_first") or []
     more_coding = pack.get("more_coding_questions") or []
-    gaps = str(pack.get("research_gaps") or "").strip()
 
-    if top_5 or more_coding or gaps:
+    if top_5 or more_coding:
         flow.append(Spacer(1, 4))
         flow.append(HRFlowable(width="100%", thickness=0.6, color=ACCENT))
         flow.append(Spacer(1, 6))
-        flow.append(Paragraph("Strategic Preparation & Evidence Audit", STYLE_SECTION))
+        flow.append(Paragraph("Strategic Preparation", STYLE_SECTION))
         flow.append(Spacer(1, 3))
 
     if top_5:
@@ -351,22 +350,6 @@ def _strategic_prep_flow(pack: Dict[str, Any]) -> List[Any]:
             coding_block.append(Paragraph(_esc(problem), STYLE_BULLET, bulletText=f"{idx}."))
         flow.append(KeepTogether(coding_block))
         flow.append(Spacer(1, 6))
-
-    if gaps:
-        gap_block: List[Any] = [
-            Paragraph("Research Gaps & Evidence Classification Reference:", STYLE_SUBSECTION),
-            Paragraph(_esc(gaps), STYLE_CODE_NOTE),
-            Spacer(1, 2),
-            Paragraph(
-                "<b>Evidence Classification Framework:</b><br/>"
-                "• <b>Class A:</b> Verifiably reported for the exact company and target role in past interviews.<br/>"
-                "• <b>Class B:</b> Reported for the company in broader technical rounds or adjacent teams.<br/>"
-                "• <b>Class C:</b> Derived directly from active company products, tech stack implementations, and verified employee profiles.<br/>"
-                "• <b>Class D:</b> Predicted based on Job Description requirements and standard industry benchmarks for 0-1 year freshers.",
-                STYLE_CODE_NOTE,
-            ),
-        ]
-        flow.append(KeepTogether(gap_block))
 
     return flow
 
