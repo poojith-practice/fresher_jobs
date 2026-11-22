@@ -74,7 +74,7 @@ class RotatingLLM:
         self.active_groq_idx = 0
         self.openrouter_exhausted = False
         self.groq_exhausted = False
-        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
+        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
         self.groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
     def has_keys(self) -> bool:
@@ -104,7 +104,7 @@ class RotatingLLM:
                         base_url="https://openrouter.ai/api/v1",
                         model=self.openrouter_model,
                         temperature=0.1,
-                        max_tokens=max_tokens or 350,
+                        max_tokens=max_tokens or 600,
                         default_headers={
                             "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
                             "X-Title": "Fresher Job Intelligence Scraper",
@@ -139,7 +139,7 @@ class RotatingLLM:
                         base_url="https://api.groq.com/openai/v1",
                         model=self.groq_model,
                         temperature=0.1,
-                        max_tokens=max_tokens or 350,
+                        max_tokens=max_tokens or 600,
                     )
                     res = client.invoke(messages)
                     if not _extract_text(res):
