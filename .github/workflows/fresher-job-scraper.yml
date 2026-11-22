@@ -10,12 +10,9 @@ on:
       lookback_hours:
         description: "Hours of job history to fetch (default: 24)"
         required: false
-        type: choice
+        type: string
         default: "24"
-        options:
-          - "20"
-          - "24"
-          - "48"
+  repository_dispatch:
 
 permissions:
   contents: write
@@ -93,6 +90,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             python -u main.py --hours "${{ inputs.lookback_hours || '24' }}"
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            python -u main.py --hours "${{ github.event.client_payload.lookback_hours || '24' }}"
           else
             python -u main.py --hours 48
           fi
