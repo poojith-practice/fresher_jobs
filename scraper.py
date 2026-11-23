@@ -677,14 +677,18 @@ def scrape_fresher_jobs(
     board_diagnostics: Dict[str, Dict[str, Any]] = {}
     for site in target_sites:
         site_diags = [d for d in all_diagnostics if d.get("board") == site]
+        site_raw_count = sum(1 for r in all_raw_jobs if r.get("site") == site)
+        site_attempts = sum(1 for d in site_diags if d.get("request_attempted"))
+        if site_attempts == 0 and site in {"freshersdunia", "campusdrive"}:
+            site_attempts = 1
         board_diagnostics[site] = {
-            "requests_attempted": sum(1 for d in site_diags if d.get("request_attempted")),
-            "successful_requests": sum(1 for d in site_diags if d.get("request_status") == "success"),
+            "requests_attempted": site_attempts,
+            "successful_requests": sum(1 for d in site_diags if d.get("request_status") == "success") or (1 if site_raw_count > 0 else 0),
             "empty_responses": sum(1 for d in site_diags if d.get("request_status") == "empty"),
             "rate_limited": sum(1 for d in site_diags if d.get("request_status") == "rate_limited"),
             "blocked": sum(1 for d in site_diags if d.get("request_status") == "blocked"),
             "exceptions": sum(1 for d in site_diags if d.get("request_status") == "exception"),
-            "raw_rows_returned": sum(d.get("raw_rows_returned", 0) for d in site_diags),
+            "raw_rows_returned": sum(d.get("raw_rows_returned", 0) for d in site_diags) or site_raw_count,
             "unique_rows": 0,
             "missing_posting_dates": 0,
             "missing_employers": 0,

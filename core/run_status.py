@@ -303,13 +303,14 @@ def build_report_from_stats(
     for source, source_attempts in attempts.items():
         if source not in report.sources:
             rec = report.source(source)
-            rec.attempts = int(source_attempts or 0)
             rec.rows = int(raw_by_site.get(source, 0) or 0)
+            rec.attempts = int(source_attempts) if source_attempts else (1 if rec.rows > 0 else 0)
             err_list = stats.get("site_errors", {}).get(source, [])
             error = "; ".join(err_list) if err_list else None
             rec.states = {classify_source(error, rec.rows): 1}
-        elif report.sources[source].attempts == 0 and source_attempts:
-            report.sources[source].attempts = int(source_attempts)
+        elif report.sources[source].attempts == 0:
+            rec = report.sources[source]
+            rec.attempts = int(source_attempts) if source_attempts else (1 if rec.rows > 0 else 0)
 
     for source, errors in (stats.get("site_errors") or {}).items():
         if source in report.sources:
