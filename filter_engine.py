@@ -960,7 +960,34 @@ def evaluate_job(job: Dict[str, Any], max_hours: Optional[int] = None) -> Dict[s
 
     fresher_ok, exp_reason = is_fresher_job(title, experience, desc, level)
     legit_ok, legit_reason = is_legitimate_company(company, title, desc)
-    loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
+
+    source_lower = _text(job.get("site") or job.get("source")).lower()
+    is_aggregator_verified = source_lower in {"freshersdunia", "campusdrive"} and (
+        job.get("link_health") == "VERIFIED_ACTIVE"
+        or str(job.get("verification_status")).lower() == "verified"
+    )
+
+    if is_aggregator_verified:
+        within_freshness = True
+        date_reason = f"Aggregator campaign active deadline: {job.get('application_last_date', 'Open')}"
+        job["date_freshness_verified"] = True
+        job["date_freshness_reason"] = date_reason
+        fresher_ok = True
+        exp_reason = "Verified fresher campaign"
+        legit_ok = True
+        legit_reason = "Verified employer"
+        loc_ok = bool(location and str(location).strip())
+        loc_reason = f"Aggregator campaign location accepted: '{location}'"
+        category = job.get("tech_category") or job.get("role") or categorize_role(title, desc) or "Technology"
+        has_valid_cat = True
+        job["tech_category"] = category
+        has_valid_exp = True
+    else:
+        if source_lower in {"freshersdunia", "campusdrive"}:
+            loc_ok = bool(location and str(location).strip())
+            loc_reason = f"Aggregator campaign location accepted: '{location}'"
+        else:
+            loc_ok, loc_reason = is_valid_location(location, search_city=job.get("search_city"))
 
     # Resolve apply URL
     apply_url = resolve_apply_url(job)
