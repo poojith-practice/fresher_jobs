@@ -581,15 +581,16 @@ def scrape_fresher_jobs(
         time.sleep(QUERY_DELAY_SECONDS)
         return df
 
-    worker_count = max(1, min(QUERY_CONCURRENCY, len(query_tasks)))
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        for df in executor.map(run_task, query_tasks):
-            task_diags = getattr(df, "attrs", {}).get("board_diagnostics", [])
-            all_diagnostics.extend(task_diags)
-            if not df.empty:
-                all_raw_jobs.extend(df.to_dict(orient="records"))
-            for site, error in getattr(df, "attrs", {}).get("site_errors", {}).items():
-                site_errors.setdefault(site, []).append(error)
+    if jobspy_sites:
+        worker_count = max(1, min(QUERY_CONCURRENCY, len(query_tasks)))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for df in executor.map(run_task, query_tasks):
+                task_diags = getattr(df, "attrs", {}).get("board_diagnostics", [])
+                all_diagnostics.extend(task_diags)
+                if not df.empty:
+                    all_raw_jobs.extend(df.to_dict(orient="records"))
+                for site, error in getattr(df, "attrs", {}).get("site_errors", {}).items():
+                    site_errors.setdefault(site, []).append(error)
 
     # -------------------------------------------------------------
     # Production Multi-Tier Harvesters (FreshersDunia & CampusDrive)
