@@ -311,6 +311,11 @@ def extract_fallback_skills(text: str, title: str = "", role: str = "") -> str:
         ("KYC/AML", r"\bkyc\b|\baml\b"),
         ("Requirements Gathering", r"\brequirement[s]?\s+gathering\b"),
         ("BRD/FRD", r"\bbrd\b|\bfrd\b"),
+        ("Problem Solving", r"\bproblem[\s-]solving\b"),
+        ("Financial Analysis", r"\bfinancial\s*(?:processes|analysis|modeling)?\b"),
+        ("Backup Administration", r"\bbackup\s*(?:administration|admin)?\b"),
+        ("System Administration", r"\bsystem\s*admin(?:istration)?\b"),
+        ("Communication Skills", r"\bcommunication\s*(?:skills)?\b"),
     ]
 
     for label, pattern in tech_keywords:
@@ -318,6 +323,17 @@ def extract_fallback_skills(text: str, title: str = "", role: str = "") -> str:
             found.append(label)
 
     if found:
+        if len(found) < 3:
+            t_lower = f"{title} {role}".lower()
+            if "data" in t_lower or "analyst" in t_lower:
+                supplements = ["Microsoft Excel", "Data Validation", "Analytical Problem Solving"]
+            elif "web" in t_lower or "developer" in t_lower:
+                supplements = ["Git", "REST APIs", "Debugging"]
+            else:
+                supplements = ["Microsoft Excel", "Reporting", "Documentation"]
+            for s in supplements:
+                if s not in found and len(found) < 5:
+                    found.append(s)
         return ", ".join(found[:8])
 
     t_lower = f"{title} {role}".lower()

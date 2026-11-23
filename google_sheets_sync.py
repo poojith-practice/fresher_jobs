@@ -103,6 +103,20 @@ def format_jobs_rows(
         source = str(cell(j.get("site") or j.get("source") or j.get("Source"))).upper()
         last_updated = datetime.now().isoformat(timespec="seconds")
         skills = html.unescape(str(cell(j.get("skills_requirements") or j.get("required_skills") or j.get("skills") or j.get("curated_skills") or j.get("skills/responsibilities") or j.get("job_requirement")))).strip()
+        is_narrative = (
+            any(phrase in skills.lower() for phrase in [
+                "looking for", "requirements:", "qualification:", "to get shortlisted",
+                "eligibility:", "academic", "candidates must", "candidate should", "responsibilities:",
+                "b.e.", "b.tech", "degree", "apply online"
+            ])
+            or (len(skills) > 100 and "," not in skills[:60])
+        )
+        if is_narrative:
+            try:
+                from llm_verifier import extract_fallback_skills
+                skills = extract_fallback_skills(skills, title=title, role=category)
+            except Exception:
+                pass
         interview_doc = str(cell(j.get("interview_doc_url") or j.get("Interview QnA doc") or "")).strip()
         if not interview_doc:
             interview_doc = "Pending Generation"

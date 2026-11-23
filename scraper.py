@@ -924,6 +924,14 @@ def scrape_fresher_jobs(
             if source in {"freshersdunia", "campusdrive"} and (
                 evaluated.get("verification_status") == "VERIFIED" or evaluated.get("llm_verified") is True
             ):
+                from llm_verifier import extract_fallback_skills
+                clean_skills = extract_fallback_skills(
+                    str(evaluated.get("skills_requirements") or evaluated.get("description") or ""),
+                    title=str(evaluated.get("title") or ""),
+                    role=str(evaluated.get("tech_category") or evaluated.get("role") or "")
+                )
+                evaluated["skills_requirements"] = clean_skills
+                evaluated["required_skills"] = clean_skills
                 pipeline_stage_counts["final_approved"] += 1
                 per_board_stages[source]["final_approved"] += 1
                 valid_jobs.append(evaluated)
