@@ -7,6 +7,7 @@ Includes error-isolation, pacing, deduplication, and quality evaluation.
 """
 
 import os
+import re
 import time
 import math
 import logging

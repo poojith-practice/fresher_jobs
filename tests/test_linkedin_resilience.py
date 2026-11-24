@@ -122,3 +122,51 @@ def test_explicit_fresher_title_synthesizes_context_for_llm_gatekeeper():
     evaluated = evaluate_job(dict(raw_job))
     assert evaluated["is_valid_fresher_job"] is True
     assert evaluated["experience_source"] == "title_inference"
+
+
+def test_scrape_fresher_jobs_end_to_end_pipeline_simulation():
+    """Simulate a complete scrape_fresher_jobs execution with raw DataFrame to verify no NameError or runtime crash."""
+    from scraper import scrape_fresher_jobs
+    import pandas as pd
+    from unittest.mock import patch, MagicMock
+
+    sample_df = pd.DataFrame([
+        {
+            "title": "Graduate Engineer Trainee",
+            "company": "TCS",
+            "location": "Bangalore, India",
+            "date_posted": datetime.now() - timedelta(hours=2),
+            "site": "linkedin",
+            "job_level": "entry_level",
+            "description": None,
+            "job_url": "https://www.linkedin.com/jobs/view/4493974838",
+            "job_url_direct": None,
+        },
+        {
+            "title": "Business Analyst",
+            "company": "Capco",
+            "location": "Bangalore, India",
+            "date_posted": datetime.now() - timedelta(hours=2),
+            "site": "linkedin",
+            "job_level": "entry_level",
+            "description": None,
+            "job_url": "https://www.linkedin.com/jobs/view/4494037893",
+            "job_url_direct": None,
+        }
+    ])
+
+    with patch("scraper.run_scraping_query", return_value=sample_df), \
+         patch("llm_verifier.get_llm", return_value=None):
+        results = scrape_fresher_jobs(
+            hours_old=24,
+            locations=["Bangalore"],
+            roles_dict={"Software Engineer": ["Software Engineer"]},
+            sites=["linkedin"],
+            results_per_query=2,
+        )
+        assert "valid_jobs" in results
+        assert "review_jobs" in results
+        assert "rejected_jobs" in results
+        # Generic Business Analyst with no JD went to review
+        review_titles = [j.get("title") for j in results["review_jobs"]]
+        assert "Business Analyst" in review_titles
