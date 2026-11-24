@@ -839,9 +839,9 @@ def enrich_experience_and_salary(job: Dict[str, Any]) -> Dict[str, Any]:
             "junior", "trainee", "associate software engineer", "associate engineer",
             "associate developer", "associate analyst", "entry level", "entry-level",
             "intern", "sde 1", "sde-1", "sde1", "graduate engineer trainee", "get",
-            "graduate trainee",
+            "graduate trainee", "graduate analyst", "graduate developer", "graduate engineer",
             "sw development engineer 1", "sw development engineer i", "assistant",
-        ]):
+        ]) or bool(re.search(r"\b(?:junior|trainee|associate|graduate|fresher|entry[- ]level|get)\b", title.lower())):
             exp = "0-1 Yrs (Junior / Trainee)"
             experience_source = "title_inference"
         else:

@@ -516,6 +516,27 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
 
     # 2. LinkedIn Hydration
     if site == "linkedin" or "linkedin.com" in apply_url:
+        # Check direct external ATS first
+        direct_url = str(job.get("job_url_direct") or "")
+        if direct_url and direct_url.startswith("http") and "linkedin.com" not in direct_url:
+            try:
+                import requests
+                ats_resp = requests.get(
+                    direct_url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+                    timeout=6,
+                )
+                if ats_resp.status_code == 200:
+                    soup = BeautifulSoup(ats_resp.text, "html.parser")
+                    for tag in soup(["script", "style", "nav", "footer", "header"]):
+                        tag.decompose()
+                    ats_text = soup.get_text("\n", strip=True)
+                    if len(ats_text) >= 150:
+                        job["description"] = ats_text[:16000]
+                        return ats_text[:16000]
+            except Exception:
+                pass
+
         li_id = ""
         m = re.search(r"/view/(\d+)", apply_url)
         if m:
@@ -526,7 +547,8 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
         if li_id:
             try:
                 import scraper
-                if getattr(scraper, "_LINKEDIN_RATE_LIMITED", False):
+                import time
+                if time.time() < getattr(scraper, "_LINKEDIN_HYDRATION_COOLDOWN_UNTIL", 0.0):
                     return existing_desc
             except Exception:
                 pass
@@ -552,12 +574,14 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
                         job["description"] = clean_desc
                         return clean_desc
                 elif res.status_code in (429, 403, 999):
-                    logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s. Stopping further LinkedIn requests.", res.status_code, li_id)
+                    logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s.", res.status_code, li_id)
                     try:
                         import scraper
+                        import time
                         with scraper._LINKEDIN_LOCK:
-                            scraper._LINKEDIN_RATE_LIMITED = True
+                            scraper._LINKEDIN_HYDRATION_COOLDOWN_UNTIL = time.time() + 20.0
                     except Exception:
+                        pass
                         pass
             except Exception as e:
                 logger.debug("LinkedIn hydration failed for %s: %s", li_id, e)

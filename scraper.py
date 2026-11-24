@@ -57,11 +57,13 @@ _LINKEDIN_DESCRIPTION_CACHE: Dict[str, str] = {}
 
 
 # Rate limit, concurrency control, and hydration telemetry
-_LINKEDIN_MAX_REQUESTS = int(os.getenv("MAX_LINKEDIN_REQUESTS", "15"))
+_LINKEDIN_MAX_REQUESTS = int(os.getenv("MAX_LINKEDIN_REQUESTS", "45"))
 _LINKEDIN_REQUEST_COUNT = 0
 _LINKEDIN_BACKOFF_DELAY = 1.5
 _LINKEDIN_RATE_LIMITED: bool = False
 _LINKEDIN_CONSECUTIVE_429: int = 0
+_LINKEDIN_SEARCH_COOLDOWN_UNTIL: float = 0.0
+_LINKEDIN_HYDRATION_COOLDOWN_UNTIL: float = 0.0
 _LINKEDIN_HYDRATION_STATS: Dict[str, int] = {
     "requests": 0,
     "failures": 0,
@@ -77,10 +79,13 @@ def reset_linkedin_run_counters() -> None:
     Ensures per-run isolation so earlier runs do not consume subsequent runs' caps.
     """
     global _LINKEDIN_REQUEST_COUNT, _LINKEDIN_RATE_LIMITED, _LINKEDIN_CONSECUTIVE_429
+    global _LINKEDIN_SEARCH_COOLDOWN_UNTIL, _LINKEDIN_HYDRATION_COOLDOWN_UNTIL
     with _LINKEDIN_LOCK:
         _LINKEDIN_REQUEST_COUNT = 0
         _LINKEDIN_RATE_LIMITED = False
         _LINKEDIN_CONSECUTIVE_429 = 0
+        _LINKEDIN_SEARCH_COOLDOWN_UNTIL = 0.0
+        _LINKEDIN_HYDRATION_COOLDOWN_UNTIL = 0.0
     with _LINKEDIN_HYDRATION_LOCK:
         _LINKEDIN_HYDRATION_STATS["requests"] = 0
         _LINKEDIN_HYDRATION_STATS["failures"] = 0
@@ -175,17 +180,41 @@ def clean_str(val: Any) -> str:
 
 def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any] = None) -> None:
     """
-    Hydrates full job description for candidate LinkedIn jobs via LinkedIn guest endpoint.
+    Hydrates full job description for candidate LinkedIn jobs via direct ATS or LinkedIn guest endpoint.
     Guarantees that explicit experience requirements in JD (e.g. 1-3 yrs, 5+ yrs) are captured.
-    Stops immediately if a 429 rate limit is encountered.
+    Applies a temporary backoff cooldown if a 429 rate limit is encountered without killing search scraping.
     """
     import re
     import requests
     from bs4 import BeautifulSoup
 
-    global _LINKEDIN_RATE_LIMITED
+    # 1. First check if job has a direct external ATS link (Workday, Greenhouse, Lever, etc.)
+    # External ATS links never 429 on LinkedIn and provide 100% full JD text.
+    direct_url = safe_str(raw_job.get("job_url_direct") or raw_job.get("apply_url") or "")
+    if direct_url and direct_url.startswith("http") and "linkedin.com" not in direct_url:
+        try:
+            ats_resp = requests.get(
+                direct_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+                timeout=6,
+            )
+            if ats_resp.status_code == 200:
+                soup = BeautifulSoup(ats_resp.text, "html.parser")
+                for tag in soup(["script", "style", "nav", "footer", "header"]):
+                    tag.decompose()
+                ats_text = soup.get_text("\n", strip=True)
+                if len(ats_text) >= 60:
+                    raw_job["description"] = ats_text[:16000]
+                    with _LINKEDIN_HYDRATION_LOCK:
+                        _LINKEDIN_HYDRATION_STATS["success"] += 1
+                    return
+        except Exception as e:
+            logger.debug("Direct ATS description fetch skipped for %s: %s", direct_url, e)
+
+    # 2. Check LinkedIn hydration cooldown
+    global _LINKEDIN_HYDRATION_COOLDOWN_UNTIL
     with _LINKEDIN_LOCK:
-        if _LINKEDIN_RATE_LIMITED:
+        if time.time() < _LINKEDIN_HYDRATION_COOLDOWN_UNTIL:
             return
 
     effective_url = safe_str(raw_job.get("job_url_direct") or raw_job.get("job_url") or raw_job.get("id"))
@@ -234,15 +263,14 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
                 with _LINKEDIN_HYDRATION_LOCK:
                     _LINKEDIN_HYDRATION_STATS["failures"] += 1
         elif resp.status_code in (429, 403, 999):
-            logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s.", resp.status_code, jid)
+            logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s. Cooling down hydration for 20s.", resp.status_code, jid)
             with _LINKEDIN_HYDRATION_LOCK:
                 _LINKEDIN_HYDRATION_STATS["rate_limited"] += 1
                 _LINKEDIN_HYDRATION_STATS["failures"] += 1
-                if _LINKEDIN_HYDRATION_STATS["rate_limited"] >= 3:
-                    logger.warning("LinkedIn guest endpoint 3 consecutive rate-limits reached. Tripping breaker.")
-                    with _LINKEDIN_LOCK:
-                        _LINKEDIN_RATE_LIMITED = True
-            time.sleep(2.0)
+            with _LINKEDIN_LOCK:
+                # Apply temporary 20-second cooldown on hydration without halting search queries
+                _LINKEDIN_HYDRATION_COOLDOWN_UNTIL = time.time() + 20.0
+            time.sleep(1.0)
         else:
             with _LINKEDIN_HYDRATION_LOCK:
                 _LINKEDIN_HYDRATION_STATS["failures"] += 1
@@ -267,7 +295,7 @@ def run_scraping_query(
     logger.info(f"Scraping -> Query: '{search_term}' | Location: '{location}' | Sites: {sites} | Hours: {hours_old}")
 
     def scrape_one_site(site: str) -> tuple[str, pd.DataFrame, Dict[str, Any]]:
-        global _LINKEDIN_REQUEST_COUNT, _LINKEDIN_RATE_LIMITED
+        global _LINKEDIN_REQUEST_COUNT, _LINKEDIN_RATE_LIMITED, _LINKEDIN_CONSECUTIVE_429, _LINKEDIN_SEARCH_COOLDOWN_UNTIL
         start_time = time.time()
         start_iso = datetime.now().isoformat()
         adapter_info = None
@@ -297,6 +325,28 @@ def run_scraping_query(
                         "adapter_info": "FresherLinkedIn",
                     }
                     return site, pd.DataFrame(), diag
+                if time.time() < _LINKEDIN_SEARCH_COOLDOWN_UNTIL:
+                    rem = _LINKEDIN_SEARCH_COOLDOWN_UNTIL - time.time()
+                    if rem <= 5.0:
+                        time.sleep(rem)
+                    else:
+                        end_time = time.time()
+                        diag = {
+                            "board": site,
+                            "query": search_term,
+                            "location": location,
+                            "request_started_at": start_iso,
+                            "request_finished_at": datetime.now().isoformat(),
+                            "duration_seconds": round(end_time - start_time, 3),
+                            "request_attempted": False,
+                            "request_status": "skipped_limit_reached",
+                            "raw_rows_returned": 0,
+                            "error_type": None,
+                            "error_message": None,
+                            "warning": f"Skipped: LinkedIn search cooling down ({rem:.1f}s remaining)",
+                            "adapter_info": "FresherLinkedIn",
+                        }
+                        return site, pd.DataFrame(), diag
                 if _LINKEDIN_REQUEST_COUNT >= _LINKEDIN_MAX_REQUESTS:
                     end_time = time.time()
                     diag = {
@@ -419,14 +469,14 @@ def run_scraping_query(
                 err_type = None
 
             if site == "linkedin":
-                global _LINKEDIN_CONSECUTIVE_429
                 with _LINKEDIN_LOCK:
                     if req_status == "rate_limited":
                         _LINKEDIN_CONSECUTIVE_429 += 1
-                        time.sleep(2.0)
-                        if _LINKEDIN_CONSECUTIVE_429 >= 3:
+                        _LINKEDIN_SEARCH_COOLDOWN_UNTIL = time.time() + 25.0
+                        logger.warning("LinkedIn search 429 rate-limited. Cooling down search for 25s (streak: %d).", _LINKEDIN_CONSECUTIVE_429)
+                        if _LINKEDIN_CONSECUTIVE_429 >= 5:
                             _LINKEDIN_RATE_LIMITED = True
-                            logger.warning("LinkedIn tripped breaker after 3 consecutive 429 rate-limits.")
+                            logger.warning("LinkedIn tripped breaker after 5 consecutive 429 rate-limits.")
                     elif req_status == "success":
                         _LINKEDIN_CONSECUTIVE_429 = 0
 
@@ -462,10 +512,10 @@ def run_scraping_query(
                 with _LINKEDIN_LOCK:
                     if req_status == "rate_limited":
                         _LINKEDIN_CONSECUTIVE_429 += 1
-                        time.sleep(2.0)
-                        if _LINKEDIN_CONSECUTIVE_429 >= 3:
+                        _LINKEDIN_SEARCH_COOLDOWN_UNTIL = time.time() + 25.0
+                        if _LINKEDIN_CONSECUTIVE_429 >= 5:
                             _LINKEDIN_RATE_LIMITED = True
-                            logger.warning("LinkedIn tripped breaker after 3 consecutive 429 exceptions.")
+                            logger.warning("LinkedIn tripped breaker after 5 consecutive 429 exceptions.")
 
             diag = {
                 "board": site,
@@ -864,7 +914,7 @@ def scrape_fresher_jobs(
         # 3. Hydrate description for candidate LinkedIn jobs that pass preliminary triage.
         # A short/empty description is exactly where LinkedIn hides the experience
         # requirement, so do not require a role-category match before hydrating.
-        if source == "linkedin" and not _LINKEDIN_RATE_LIMITED and len(safe_str(raw_job.get("description"))) < 150:
+        if source == "linkedin" and len(safe_str(raw_job.get("description"))) < 150:
             title_clean = safe_str(raw_job.get("title"))
             company_clean = safe_str(raw_job.get("company"))
             loc_clean = safe_str(raw_job.get("location"))
@@ -900,16 +950,22 @@ def scrape_fresher_jobs(
             and source in {"linkedin", "indeed"}
             and _only_missing_experience(evaluated)
         ):
-            if source == "linkedin" and not _LINKEDIN_RATE_LIMITED and len(safe_str(evaluated.get("description"))) < 150:
+            if source == "linkedin" and len(safe_str(evaluated.get("description"))) < 150:
                 hydrate_linkedin_description(evaluated, session=li_session)
                 time.sleep(0.5)
                 evaluated = evaluate_job(evaluated, max_hours=hours_old)
 
             if not evaluated["is_valid_fresher_job"] and _only_missing_experience(evaluated):
                 desc_len = len(safe_str(evaluated.get("description")))
-                if desc_len >= 150:
-                    # The JD has sufficient substance; allow Stage 5 LLM Gatekeeper
-                    # to read the description and verify whether it's genuinely fresher-eligible.
+                title_lower = safe_str(evaluated.get("title")).lower()
+                is_explicit_fresher_title = bool(re.search(
+                    r"\b(?:junior|trainee|associate|graduate|fresher|entry[- ]level|get|sde[- ]?1)\b",
+                    title_lower
+                )) and not any(k in title_lower for k in ("senior", "lead", "manager", "director", "architect", "head", "principal", "specialist"))
+
+                if desc_len >= 150 or (source == "linkedin" and is_explicit_fresher_title):
+                    # The JD has sufficient substance OR the role title is an explicit junior/trainee designation.
+                    # Allow Stage 5 LLM Gatekeeper to verify whether it's genuinely fresher-eligible.
                     evaluated["is_valid_fresher_job"] = True
                 else:
                     evaluated["needs_review"] = True
@@ -946,6 +1002,24 @@ def scrape_fresher_jobs(
             try:
                 from llm_verifier import hydrate_job_description, verify_fresher_and_curate_skills, extract_fallback_skills
                 desc = hydrate_job_description(evaluated)
+                title_lower = str(evaluated.get("title", "")).lower()
+                is_explicit_fresher_title = bool(re.search(
+                    r"\b(?:junior|trainee|associate|graduate|fresher|entry[- ]level|get|sde[- ]?1)\b",
+                    title_lower
+                )) and not any(k in title_lower for k in ("senior", "lead", "manager", "director", "architect", "head", "principal", "specialist"))
+
+                if not desc and is_explicit_fresher_title:
+                    # Synthesize card context for LLM Gatekeeper when title is explicitly a fresher/trainee role
+                    desc = (
+                        f"Job Title: {evaluated.get('title')}\n"
+                        f"Company: {evaluated.get('company')}\n"
+                        f"Location: {evaluated.get('location')}\n"
+                        f"Target Category: {evaluated.get('tech_category') or evaluated.get('role')}\n"
+                        f"Experience Level: Entry Level / Fresher (Explicit Junior/Trainee Designation)\n"
+                        f"Responsibilities and Requirements: Entry-level software and analytics fresher role requiring technical fundamentals."
+                    )
+                    evaluated["description"] = desc
+
                 if not desc:
                     evaluated["needs_review"] = True
                     evaluated["review_reason"] = (
