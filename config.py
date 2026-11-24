@@ -1,29 +1,5 @@
-"""Config package combining legacy root configuration with coverage lab settings."""
-import os
-import sys
+"""Production configuration for the Fresher Job Scraper pipeline."""
 
-# Re-export settings from config.settings
-from config.settings import (
-    LAB_DIR,
-    DATA_DIR,
-    RAW_DATA_DIR,
-    NORMALIZED_DATA_DIR,
-    VERIFIED_DATA_DIR,
-    REJECTED_DATA_DIR,
-    MANUAL_REVIEW_DATA_DIR,
-    REPORTS_DIR,
-    LOGS_DIR,
-    EXPERIMENTAL_DB_PATH,
-    PERMITTED_BATCHES,
-    CURRENT_TARGET_BATCHES,
-    MAX_FRESHER_EXPERIENCE_YEARS,
-    TIMEZONE,
-    TARGET_ROLE_CATEGORIES,
-    REQUEST_HEADERS,
-)
-from config.sources import SOURCES_CONFIG
-
-# Also import and re-export legacy config attributes for backwards compatibility
 MAX_HOURS_OLD = 48
 TARGET_SITES = ["freshersdunia", "campusdrive", "naukri", "indeed", "linkedin", "monsterindia"]
 UNSUPPORTED_SITES = []

@@ -1,11 +1,8 @@
-"""Normalization package export."""
-from normalization.opportunity_classifier import classify_opportunity_type
-from normalization.skills_generator import generate_skills
-from normalization.job_normalizer import normalize_opportunity, normalize_title
+"""Canonical job normalization and deduplication."""
+
+from normalization.canonical_job import deduplicate, to_canonical
 
 __all__ = [
-    "classify_opportunity_type",
-    "generate_skills",
-    "normalize_opportunity",
-    "normalize_title",
+    "deduplicate",
+    "to_canonical",
 ]
