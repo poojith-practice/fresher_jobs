@@ -228,23 +228,24 @@ CSV_HEADERS = [
 ]
 
 DOMAIN_COMPANY_MAP = {
+    # Company-owned private domains
     "qualcomm.com": ["qualcomm"],
     "tatacommunications.com": ["tata communications", "tata"],
-    "oraclecloud.com": ["texas instruments", "ti", "oracle"],
-    "myworkdayjobs.com": ["dentsu", "dentsuaegis"],
-    "njoyn.com": ["cgi"],
     "hpe.com": ["hpe", "hewlett packard enterprise"],
     "accenture.com": ["accenture"],
     "amazon.jobs": ["amazon"],
     "cognizant.com": ["cognizant"],
     "genpact.com": ["genpact"],
     "infosys.com": ["infosys"],
-    "peoplestrong.com": ["larsen", "toubro", "l&t"],
     "schneider-electric.com": ["schneider electric", "schneider"],
     "synopsys.com": ["synopsys"],
     "tatamotors.com": ["tata motors", "tata"],
     "tcs.com": ["tcs", "tata consultancy services"],
     "wipro.com": ["wipro"],
+    # Known tenant subdomains on shared multi-tenant ATS platforms
+    "dentsuaegis.wd3.myworkdayjobs.com": ["dentsu", "dentsuaegis"],
+    "larsentoubrocareers.peoplestrong.com": ["larsen", "toubro", "l&t"],
+    "jpmc.fa.oraclecloud.com": ["jpmorgan", "j.p. morgan", "jpmc"],
 }
 
 COMPANY_PORTAL_FALLBACKS = {

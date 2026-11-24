@@ -230,18 +230,20 @@ CSV_HEADERS = [
 ]
 
 DOMAIN_COMPANY_MAP = {
+    # Company-owned private domains (any mismatch is a genuine copy-paste error)
     "deloitte.com": ["deloitte"],
-    "peoplestrong.com": ["larsen", "toubro", "l&t"],
-    "oraclecloud.com": ["mouser", "kpmg", "oracle"],
-    "linkedin.com": ["dentsu", "linkedin"],
     "infosys.com": ["infosys"],
     "wipro.com": ["wipro"],
     "jio.com": ["jio", "reliance"],
-    "eightfold.ai": ["paypal", "eightfold"],
     "amazon.jobs": ["amazon"],
     "accenture.com": ["accenture"],
     "capgemini.com": ["capgemini"],
-    "joinsuperset.com": ["capgemini", "superset", "cognizant"],
+    # Known tenant subdomains on shared multi-tenant ATS platforms
+    # (Never key on bare shared roots like oraclecloud.com/eightfold.ai/peoplestrong.com)
+    "larsentoubrocareers.peoplestrong.com": ["larsen", "toubro", "l&t"],
+    "paypal.eightfold.ai": ["paypal", "eightfold"],
+    "jpmc.fa.oraclecloud.com": ["jpmorgan", "j.p. morgan", "jpmc"],
+    "ejgk.fa.em2.oraclecloud.com": ["kpmg"],
 }
 
 COMPANY_PORTAL_FALLBACKS = {
