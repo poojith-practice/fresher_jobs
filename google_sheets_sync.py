@@ -244,7 +244,7 @@ def parse_legacy_hr_details(text: Any) -> List[str]:
         return ["not found", "not found", "not found", "not found", "not found"]
 
     hr_name = hr_role = hr_email = hr_phone = hr_linkedin = ""
-    parts = [p.strip() for p in raw.split("|") if p.strip()]
+    parts = [p.strip() for p in re.split(r"\s*\|\s*(?=(?:Email|Phone|LinkedIn)\s*:)", raw, flags=re.I) if p.strip()]
     for idx, part in enumerate(parts):
         low = part.lower()
         if low.startswith("email:"):
@@ -254,10 +254,12 @@ def parse_legacy_hr_details(text: Any) -> List[str]:
         elif low.startswith("linkedin:"):
             hr_linkedin = part.split(":", 1)[1].strip()
         elif idx == 0:
-            m = re.match(r"^(.*?)\s*\(([^()]+)\)\s*$", part)
+            m = re.match(r"^(.*?)\s*\((.+)\)\s*$", part)
             if m:
                 hr_name = m.group(1).strip()
                 hr_role = m.group(2).strip()
+            elif "(" in part:
+                hr_name, hr_role = [x.strip() for x in part.split("(", 1)]
             else:
                 hr_name = part
 

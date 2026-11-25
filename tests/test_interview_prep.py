@@ -364,6 +364,10 @@ def test_split_hr_columns_and_legacy_migration():
         "Reema Prasad (Talent Acquisition Lead) | Email: reema@hitachi.com | LinkedIn: https://linkedin.com/in/reema"
     ) == ["Reema Prasad", "Talent Acquisition Lead", "reema@hitachi.com", "not found", "https://linkedin.com/in/reema"]
 
+    assert parse_legacy_hr_details(
+        "Sushanth Suvarna (Talent Acquisition | Campus Hiring) | Email: sushanth@tetrapak.com | LinkedIn: https://linkedin.com/in/sushanth"
+    ) == ["Sushanth Suvarna", "Talent Acquisition | Campus Hiring", "sushanth@tetrapak.com", "not found", "https://linkedin.com/in/sushanth"]
+
     assert parse_legacy_hr_details("Not found from RocketReach") == ["not found"] * 5
 
     legacy_row = [
