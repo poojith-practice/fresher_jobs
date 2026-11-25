@@ -14,7 +14,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import RLock, local as thread_local
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
+from urllib.parse import urlparse
 import pandas as pd
 try:
     import jobspy
@@ -169,6 +170,83 @@ def get_job_url(raw_job: Dict[str, Any]) -> str:
     if url:
         return url
     return safe_str(raw_job.get("id"))
+
+
+_BOARD_LINK_HOSTS = (
+    "linkedin.com",
+    "naukri.com",
+    "indeed.com",
+    "foundit.in",
+    "monsterindia.com",
+    "glassdoor.com",
+    "glassdoor.co.in",
+)
+
+_DEAD_URL_PATH_MARKERS = (
+    "/errors/404",
+    "/error/404",
+    "/404",
+    "/not-found",
+)
+
+_SOFT_404_PHRASES = (
+    "the page you are looking for cannot be found",
+    "page you are looking for could not be found",
+    "this job is no longer available",
+    "job you are looking for is no longer open",
+    "requisition is no longer active",
+    "sorry, this job is closed",
+    "job posting has expired",
+    "no longer accepting applications",
+)
+
+
+def check_apply_url_alive(url: str, timeout: int = 8) -> Tuple[bool, str]:
+    """
+    Lightweight final-stage probe for external corporate/ATS apply URLs.
+    Catches HTTP 404/410, soft-404 redirects (e.g. /errors/404 with HTTP 200),
+    and explicit expired-job banners. Fails open on anti-bot 403/429/timeouts
+    and skips major job boards so legitimate listings are never falsely dropped.
+    """
+    clean_url = str(url or "").strip()
+    if not clean_url.startswith("http"):
+        return False, "Missing or invalid apply URL"
+
+    host = urlparse(clean_url).netloc.lower()
+    if any(board in host for board in _BOARD_LINK_HOSTS):
+        return True, "SKIPPED_BOARD_URL"
+
+    try:
+        import requests
+        resp = requests.get(
+            clean_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout=timeout,
+            allow_redirects=True,
+        )
+    except Exception as exc:
+        return True, f"PROBED_TIMEOUT_OR_NET_ERR:{type(exc).__name__}"
+
+    if resp.status_code in (404, 410):
+        return False, f"Dead apply URL (HTTP {resp.status_code})"
+
+    final_path = urlparse(resp.url).path.lower()
+    if any(marker in final_path for marker in _DEAD_URL_PATH_MARKERS):
+        return False, f"Dead apply URL (redirected to error page: {resp.url})"
+
+    if 200 <= resp.status_code < 400:
+        body_lower = (resp.text or "")[:32768].lower()
+        for phrase in _SOFT_404_PHRASES:
+            if phrase in body_lower:
+                return False, f"Dead apply URL (soft-404 / expired banner: '{phrase}')"
+
+    return True, "VERIFIED_ACTIVE"
 
 
 def clean_str(val: Any) -> str:
@@ -1178,6 +1256,38 @@ def scrape_fresher_jobs(
                     })
                     rejected_jobs.append(evaluated)
                 return
+
+            # Final destination URL health check (catches soft-404s like /errors/404 on external ATS links)
+            if not evaluated.get("link_health"):
+                is_alive, health_note = check_apply_url_alive(str(evaluated.get("apply_url") or ""))
+                if not is_alive:
+                    logger.warning(
+                        "REJECTED dead apply URL for %s @ %s: %s",
+                        evaluated.get("title"), evaluated.get("company"), health_note,
+                    )
+                    evaluated["is_valid_fresher_job"] = False
+                    evaluated["rejection_reason"] = health_note
+                    evaluated["link_health"] = "DEAD_LINK"
+                    with _stats_lock:
+                        pipeline_stage_counts["required_fields_rejected"] += 1
+                        per_board_stages[source]["required_fields_rejected"] += 1
+                        primary_rejection_counts["required_fields_rejected"] += 1
+                        if source in per_board_primary_rejections:
+                            per_board_primary_rejections[source]["required_fields_rejected"] += 1
+                        overlapping_rejection_flags["required_fields_rejected"] += 1
+                        rejection_ledger.append({
+                            "job_id": str(evaluated.get("id") or evaluated.get("apply_url") or evaluated.get("title")),
+                            "board": source,
+                            "search_query": evaluated.get("search_query", ""),
+                            "search_location": evaluated.get("search_city", evaluated.get("location", "")),
+                            "title": evaluated.get("title", ""),
+                            "company": evaluated.get("company", ""),
+                            "primary_reason": "required_fields_rejected",
+                            "all_reasons": ["required_fields_rejected"],
+                        })
+                        rejected_jobs.append(evaluated)
+                    return
+                evaluated["link_health"] = health_note
 
             with _stats_lock:
                 pipeline_stage_counts["final_approved"] += 1
