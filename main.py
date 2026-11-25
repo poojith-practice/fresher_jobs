@@ -14,6 +14,7 @@ Usage:
 import os
 import sys
 import json
+import shutil
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,7 @@ from config import (
 from scraper import scrape_fresher_jobs
 from hr_enricher import process_hr_enrichment
 from history_store import HistoryStore
-from google_sheets_sync import sync_configured_google_sheet
+from google_sheets_sync import sync_configured_google_sheet, get_existing_sheet_job_urls
 from excel_exporter import export_to_excel
 from core.run_status import RunReport, build_report_from_stats, OUTCOME_SUCCESS, OUTCOME_NO_JOBS
 from normalization.canonical_job import deduplicate, to_canonical
@@ -148,6 +149,13 @@ def main():
     print(f" • Results per query:  {results_limit}")
     print("=" * 70 + "\n")
 
+    # Pre-load existing Sheet1 URLs so already-synced jobs skip redundant hydration & LLM calls
+    known_synced_urls = set()
+    if not getattr(args, "diagnostic_only", False):
+        known_synced_urls = get_existing_sheet_job_urls()
+        if known_synced_urls:
+            print(f"[*] Pre-loaded {len(known_synced_urls)} existing Sheet1 URLs for early deduplication.")
+
     # Run scraper
     results = scrape_fresher_jobs(
         locations=args.locations,
@@ -155,6 +163,7 @@ def main():
         sites=args.sites,
         hours_old=args.hours,
         results_per_query=results_limit,
+        known_synced_urls=known_synced_urls or None,
     )
 
     valid_jobs = results["valid_jobs"]
@@ -211,13 +220,12 @@ def main():
 
         # Export CSV
         df_valid.to_csv(csv_path, index=False, encoding="utf-8-sig")
-        df_valid.to_csv(latest_csv, index=False, encoding="utf-8-sig")
+        shutil.copy2(csv_path, latest_csv)
 
         # Export JSON
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(valid_jobs, f, indent=2, default=str)
-        with open(latest_json, "w", encoding="utf-8") as f:
-            json.dump(valid_jobs, f, indent=2, default=str)
+        shutil.copy2(json_path, latest_json)
 
         # 2. Enrich Hiring Companies with HR Contacts for Telecalling Team
         hr_leads = process_hr_enrichment(valid_jobs)
@@ -249,7 +257,7 @@ def main():
 
         # 3. Export Formatted Multi-Sheet Excel Workbook (Jobs + HR Leads + Summary + Rejected)
         export_to_excel(df_valid, rejected_jobs, stats, xlsx_path, hr_leads=hr_leads)
-        export_to_excel(df_valid, rejected_jobs, stats, latest_xlsx, hr_leads=hr_leads)
+        shutil.copy2(xlsx_path, latest_xlsx)
 
         print(f"\n[+] Saved {len(valid_jobs)} verified fresher jobs to:")
         print(f"    - Excel: {xlsx_path}")
@@ -321,6 +329,7 @@ def main():
         try:
             from interview_prep.runner import run_interview_docs
             interview_dir = os.path.join(output_dir, "interview_docs")
+            prep_stats = None
             if valid_jobs:
                 print("\n[*] Generating Interview Prep Documents & Google Drive links for verified fresher jobs...")
                 prep_stats = run_interview_docs(valid_jobs, output_base_dir=interview_dir, sync_sheet=True)
@@ -328,19 +337,29 @@ def main():
                     f"[✓] Interview Prep: {prep_stats['generated']} generated, "
                     f"{prep_stats['cached']} cached, {prep_stats['failed']} failed."
                 )
-            print("[*] Checking Google Sheet for any remaining 'Pending Generation' rows to backfill...")
-            backfill_stats = run_interview_docs(
-                from_sheet=True,
-                pending_only=True,
-                limit=20,
-                output_base_dir=interview_dir,
-                sync_sheet=True,
+            # Skip redundant backfill retry when Pass 1 failed 100% (e.g., LLM outage)
+            llm_totally_failing = (
+                prep_stats is not None
+                and prep_stats.get("generated", 0) == 0
+                and prep_stats.get("cached", 0) == 0
+                and prep_stats.get("failed", 0) > 0
             )
-            if backfill_stats["total_jobs"] > 0:
-                print(
-                    f"[✓] Pending Backfill: {backfill_stats['generated']} generated, "
-                    f"{backfill_stats['cached']} cached, {backfill_stats['failed']} failed."
+            if llm_totally_failing:
+                print("[*] Skipping Pending Backfill: Pass 1 failed on all jobs (avoiding duplicate LLM retries).")
+            else:
+                print("[*] Checking Google Sheet for any remaining 'Pending Generation' rows to backfill...")
+                backfill_stats = run_interview_docs(
+                    from_sheet=True,
+                    pending_only=True,
+                    limit=20,
+                    output_base_dir=interview_dir,
+                    sync_sheet=True,
                 )
+                if backfill_stats["total_jobs"] > 0:
+                    print(
+                        f"[✓] Pending Backfill: {backfill_stats['generated']} generated, "
+                        f"{backfill_stats['cached']} cached, {backfill_stats['failed']} failed."
+                    )
         except Exception as exc:
             print(f"[!] Interview prep generation encountered an error: {exc}")
 

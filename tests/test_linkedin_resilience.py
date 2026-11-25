@@ -170,3 +170,57 @@ def test_scrape_fresher_jobs_end_to_end_pipeline_simulation():
         # Generic Business Analyst with no JD went to review
         review_titles = [j.get("title") for j in results["review_jobs"]]
         assert "Business Analyst" in review_titles
+
+
+def test_known_synced_urls_skips_hydration_and_llm():
+    """Verify already-synced Sheet1 URLs skip hydration and LLM while preserving reconciliation."""
+    from scraper import scrape_fresher_jobs
+    import pandas as pd
+    from unittest.mock import patch
+
+    synced_url = "https://www.linkedin.com/jobs/view/999000111"
+    sample_df = pd.DataFrame([
+        {
+            "title": "Graduate Engineer Trainee",
+            "company": "TCS",
+            "location": "Bangalore, India",
+            "date_posted": datetime.now() - timedelta(hours=2),
+            "site": "linkedin",
+            "job_level": "entry_level",
+            "description": None,
+            "job_url": synced_url,
+            "job_url_direct": None,
+        }
+    ])
+
+    with patch("scraper.run_scraping_query", return_value=sample_df), \
+         patch("scraper.hydrate_linkedin_description") as mock_hydrate, \
+         patch("llm_verifier.verify_fresher_and_curate_skills") as mock_llm:
+        results = scrape_fresher_jobs(
+            hours_old=24,
+            locations=["Bangalore"],
+            roles_dict={"Software Engineer": ["Software Engineer"]},
+            sites=["linkedin"],
+            results_per_query=1,
+            known_synced_urls={synced_url.upper()},
+        )
+        assert mock_hydrate.call_count == 0
+        assert mock_llm.call_count == 0
+        assert results["stats"]["pipeline_stages"]["already_synced_skipped"] == 1
+        assert results["stats"]["reconciliation_invariants"]["raw_records_reconciled"] is True
+        assert results["stats"]["reconciliation_invariants"]["unique_jobs_reconciled"] is True
+
+
+def test_rotating_llm_reuses_cached_clients():
+    """Verify RotatingLLM caches ChatOpenAI client instances per provider/key/model/max_tokens."""
+    from llm_verifier import RotatingLLM
+    from unittest.mock import patch, MagicMock
+
+    llm = RotatingLLM()
+    with patch("langchain_openai.ChatOpenAI", side_effect=lambda **kwargs: MagicMock()) as mock_cls:
+        c1 = llm._get_client("openrouter", "key1", "https://openrouter.ai/api/v1", "m1", 600, {"reasoning": {"enabled": False}})
+        c2 = llm._get_client("openrouter", "key1", "https://openrouter.ai/api/v1", "m1", 600, {"reasoning": {"enabled": False}})
+        c3 = llm._get_client("openrouter", "key2", "https://openrouter.ai/api/v1", "m1", 600, {"reasoning": {"enabled": False}})
+        assert c1 is c2
+        assert c1 is not c3
+        assert mock_cls.call_count == 2

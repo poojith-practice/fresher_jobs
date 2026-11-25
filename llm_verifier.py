@@ -85,6 +85,27 @@ class RotatingLLM:
         self._lock = threading.Lock()
         self._openrouter_cooldowns: Dict[int, float] = {}
         self._groq_cooldowns: Dict[int, float] = {}
+        self._client_cache: Dict[tuple, Any] = {}
+
+    def _get_client(self, provider: str, api_key: str, base_url: str, model: str, max_tokens: int, model_kwargs: Dict[str, Any], default_headers: Optional[Dict[str, str]] = None) -> Any:
+        from langchain_openai import ChatOpenAI
+        cache_key = (provider, api_key, model, max_tokens, tuple(sorted((k, str(v)) for k, v in model_kwargs.items())))
+        with self._lock:
+            client = self._client_cache.get(cache_key)
+            if client is None:
+                kwargs: Dict[str, Any] = {
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "model": model,
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens,
+                    "model_kwargs": model_kwargs,
+                }
+                if default_headers:
+                    kwargs["default_headers"] = default_headers
+                client = ChatOpenAI(**kwargs)
+                self._client_cache[cache_key] = client
+            return client
 
     def has_keys(self) -> bool:
         return bool(self.openrouter_keys or self.groq_keys)
@@ -136,11 +157,11 @@ class RotatingLLM:
                     curr_key = self.openrouter_keys[idx]
                     key_id = f"OpenRouter Key #{idx + 1}"
                     try:
-                        client = ChatOpenAI(
+                        client = self._get_client(
+                            provider="openrouter",
                             api_key=curr_key,
                             base_url="https://openrouter.ai/api/v1",
                             model=self.openrouter_model,
-                            temperature=0.1,
                             max_tokens=max_tokens or 600,
                             model_kwargs={"reasoning": {"enabled": False}},
                             default_headers={
@@ -183,13 +204,14 @@ class RotatingLLM:
                     key_id = f"Groq Key #{idx + 1}"
                     for g_model in groq_models:
                         try:
-                            client = ChatOpenAI(
+                            g_kwargs = {"reasoning_effort": "none"} if "qwen" in g_model else ({"reasoning_effort": "low"} if "gpt-oss" in g_model else {})
+                            client = self._get_client(
+                                provider="groq",
                                 api_key=curr_key,
                                 base_url="https://api.groq.com/openai/v1",
                                 model=g_model,
-                                temperature=0.1,
                                 max_tokens=max_tokens or 600,
-                                model_kwargs={"reasoning_effort": "none"} if "qwen" in g_model else ({"reasoning_effort": "low"} if "gpt-oss" in g_model else {}),
+                                model_kwargs=g_kwargs,
                             )
                             res = client.invoke(messages)
                             if not _extract_text(res):

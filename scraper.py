@@ -13,8 +13,8 @@ import math
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from threading import RLock
-from typing import List, Dict, Any, Optional
+from threading import RLock, local as thread_local
+from typing import List, Dict, Any, Optional, Set
 import pandas as pd
 try:
     import jobspy
@@ -570,6 +570,7 @@ def scrape_fresher_jobs(
     hours_old: int = MAX_HOURS_OLD,
     results_per_query: int = RESULTS_PER_QUERY,
     proxies: Optional[List[str]] = None,
+    known_synced_urls: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """
     Main orchestration loop.
@@ -755,6 +756,7 @@ def scrape_fresher_jobs(
         "pipeline_input": 0,
         "duplicate_url": 0,
         "duplicate_composite": 0,
+        "already_synced_skipped": 0,
         "missing_posting_date": 0,
         "too_old": 0,
         "location_rejected": 0,
@@ -778,6 +780,7 @@ def scrape_fresher_jobs(
             "pipeline_input": 0,
             "duplicate_url": 0,
             "duplicate_composite": 0,
+            "already_synced_skipped": 0,
             "missing_posting_date": 0,
             "too_old": 0,
             "location_rejected": 0,
@@ -837,12 +840,10 @@ def scrape_fresher_jobs(
     rejected_jobs: List[Dict[str, Any]] = []
     review_jobs: List[Dict[str, Any]] = []
 
-    li_session = None
-    try:
-        import requests
-        li_session = requests.Session()
-    except Exception:
-        pass
+    normalized_known_urls: Set[str] = {
+        str(u).strip().casefold() for u in (known_synced_urls or set()) if str(u).strip()
+    }
+    unique_candidates: List[tuple[str, Dict[str, Any]]] = []
 
     for raw_job in all_raw_jobs:
         source = clean_str(raw_job.get("site")) or "unknown"
@@ -905,12 +906,48 @@ def scrape_fresher_jobs(
             continue
         seen_composite_keys.add(comp_key)
 
+        # 2b. Early Sheet1 Dedup (skip hydration & LLM for jobs already live in Sheet1)
+        if normalized_known_urls and any(
+            u.casefold() in normalized_known_urls
+            for u in (effective_url, direct_url, page_url)
+            if u
+        ):
+            pipeline_stage_counts["already_synced_skipped"] += 1
+            per_board_stages[source]["already_synced_skipped"] += 1
+            continue
+
         # Record entering eligibility pipeline
         pipeline_stage_counts["pipeline_input"] += 1
         per_board_stages[source]["pipeline_input"] += 1
         per_board_stages[source]["unique_records"] += 1
         if source in board_diagnostics:
             board_diagnostics[source]["unique_rows"] += 1
+
+        unique_candidates.append((source, raw_job))
+
+    if pipeline_stage_counts["already_synced_skipped"] > 0:
+        logger.info(
+            "Skipped %d already-synced job(s) before hydration & LLM verification.",
+            pipeline_stage_counts["already_synced_skipped"],
+        )
+
+    _thread_local = thread_local()
+    _stats_lock = RLock()
+
+    def _get_thread_session():
+        sess = getattr(_thread_local, "session", None)
+        if sess is None:
+            try:
+                import requests
+                sess = requests.Session()
+                _thread_local.session = sess
+            except Exception:
+                sess = None
+        return sess
+
+    def _process_candidate(item: tuple[str, Dict[str, Any]]) -> None:
+        source, raw_job = item
+        li_sess = _get_thread_session()
 
         # 3. Hydrate description for candidate LinkedIn jobs that pass preliminary triage.
         # A short/empty description is exactly where LinkedIn hides the experience
@@ -923,7 +960,7 @@ def scrape_fresher_jobs(
             legit, _ = is_legitimate_company(company_clean, title_clean)
             loc_ok, _ = is_valid_location(loc_clean, search_city=raw_job.get("search_city"))
             if within_h and legit and loc_ok:
-                hydrate_linkedin_description(raw_job, session=li_session)
+                hydrate_linkedin_description(raw_job, session=li_sess)
                 time.sleep(0.5)
 
         # 4. Evaluate criteria (freshness, fresher experience, anti-scam blacklist)
@@ -952,7 +989,7 @@ def scrape_fresher_jobs(
             and _only_missing_experience(evaluated)
         ):
             if source == "linkedin" and len(safe_str(evaluated.get("description"))) < 150:
-                hydrate_linkedin_description(evaluated, session=li_session)
+                hydrate_linkedin_description(evaluated, session=li_sess)
                 time.sleep(0.5)
                 evaluated = evaluate_job(evaluated, max_hours=hours_old)
 
@@ -989,17 +1026,19 @@ def scrape_fresher_jobs(
                 )
                 evaluated["skills_requirements"] = clean_skills
                 evaluated["required_skills"] = clean_skills
-                pipeline_stage_counts["final_approved"] += 1
-                per_board_stages[source]["final_approved"] += 1
-                valid_jobs.append(evaluated)
-                continue
+                with _stats_lock:
+                    pipeline_stage_counts["final_approved"] += 1
+                    per_board_stages[source]["final_approved"] += 1
+                    valid_jobs.append(evaluated)
+                return
 
             # 5. Final LLM Gatekeeper & Skills Curator.
             # HARD GATE: only a job the LLM explicitly approves may reach
             # valid_jobs and the live Google Sheet. Anything we cannot verify
             # goes to manual review instead of being trusted by default.
-            pipeline_stage_counts["llm_attempted"] += 1
-            per_board_stages[source]["llm_attempted"] += 1
+            with _stats_lock:
+                pipeline_stage_counts["llm_attempted"] += 1
+                per_board_stages[source]["llm_attempted"] += 1
             try:
                 from llm_verifier import hydrate_job_description, verify_fresher_and_curate_skills, extract_fallback_skills
                 desc = hydrate_job_description(evaluated)
@@ -1026,10 +1065,11 @@ def scrape_fresher_jobs(
                     evaluated["review_reason"] = (
                         "Description unavailable; cannot run the LLM fresher gate"
                     )
-                    pipeline_stage_counts["llm_error_manual_review"] += 1
-                    per_board_stages[source]["llm_error_manual_review"] += 1
-                    review_jobs.append(evaluated)
-                    continue
+                    with _stats_lock:
+                        pipeline_stage_counts["llm_error_manual_review"] += 1
+                        per_board_stages[source]["llm_error_manual_review"] += 1
+                        review_jobs.append(evaluated)
+                    return
 
                 llm_eval = verify_fresher_and_curate_skills(
                     description=desc,
@@ -1050,24 +1090,25 @@ def scrape_fresher_jobs(
                             "LLM Gatekeeper: "
                             f"{llm_eval.get('rejection_reason') or 'Requires prior experience'}"
                         )
-                        pipeline_stage_counts["llm_ineligible"] += 1
-                        per_board_stages[source]["llm_ineligible"] += 1
-                        primary_rejection_counts["llm_ineligible"] += 1
-                        if source in per_board_primary_rejections:
-                            per_board_primary_rejections[source]["llm_ineligible"] += 1
-                        overlapping_rejection_flags["llm_ineligible"] += 1
-                        rejection_ledger.append({
-                            "job_id": str(evaluated.get("id") or evaluated.get("apply_url") or evaluated.get("title")),
-                            "board": source,
-                            "search_query": evaluated.get("search_query", ""),
-                            "search_location": evaluated.get("search_city", evaluated.get("location", "")),
-                            "title": evaluated.get("title", ""),
-                            "company": evaluated.get("company", ""),
-                            "primary_reason": "llm_ineligible",
-                            "all_reasons": ["llm_ineligible"],
-                        })
-                        rejected_jobs.append(evaluated)
-                        continue
+                        with _stats_lock:
+                            pipeline_stage_counts["llm_ineligible"] += 1
+                            per_board_stages[source]["llm_ineligible"] += 1
+                            primary_rejection_counts["llm_ineligible"] += 1
+                            if source in per_board_primary_rejections:
+                                per_board_primary_rejections[source]["llm_ineligible"] += 1
+                            overlapping_rejection_flags["llm_ineligible"] += 1
+                            rejection_ledger.append({
+                                "job_id": str(evaluated.get("id") or evaluated.get("apply_url") or evaluated.get("title")),
+                                "board": source,
+                                "search_query": evaluated.get("search_query", ""),
+                                "search_location": evaluated.get("search_city", evaluated.get("location", "")),
+                                "title": evaluated.get("title", ""),
+                                "company": evaluated.get("company", ""),
+                                "primary_reason": "llm_ineligible",
+                                "all_reasons": ["llm_ineligible"],
+                            })
+                            rejected_jobs.append(evaluated)
+                        return
                     else:
                         # LLM call was unavailable / timed out.
                         # If the job has verified board metadata (0-1 Yrs) AND an explicit trainee/apprentice title,
@@ -1090,13 +1131,15 @@ def scrape_fresher_jobs(
                                 "LLM gate unavailable: "
                                 f"{llm_eval.get('rejection_reason') or 'verification did not complete'}"
                             )
-                            pipeline_stage_counts["llm_error_manual_review"] += 1
-                            per_board_stages[source]["llm_error_manual_review"] += 1
-                            review_jobs.append(evaluated)
-                            continue
+                            with _stats_lock:
+                                pipeline_stage_counts["llm_error_manual_review"] += 1
+                                per_board_stages[source]["llm_error_manual_review"] += 1
+                                review_jobs.append(evaluated)
+                            return
 
-                pipeline_stage_counts["llm_eligible"] += 1
-                per_board_stages[source]["llm_eligible"] += 1
+                with _stats_lock:
+                    pipeline_stage_counts["llm_eligible"] += 1
+                    per_board_stages[source]["llm_eligible"] += 1
 
                 skills = str(llm_eval.get("curated_skills") or "").strip()
                 if not skills:
@@ -1106,21 +1149,115 @@ def scrape_fresher_jobs(
                 logger.warning("LLM verification step encountered error: %s", e)
                 evaluated["needs_review"] = True
                 evaluated["review_reason"] = f"LLM gate unavailable: {e}"
-                pipeline_stage_counts["llm_error_manual_review"] += 1
-                per_board_stages[source]["llm_error_manual_review"] += 1
-                review_jobs.append(evaluated)
-                continue
+                with _stats_lock:
+                    pipeline_stage_counts["llm_error_manual_review"] += 1
+                    per_board_stages[source]["llm_error_manual_review"] += 1
+                    review_jobs.append(evaluated)
+                return
 
             # Final safety check: NEVER allow a job into valid_jobs without skills_requirements
             if not str(evaluated.get("skills_requirements") or "").strip():
                 evaluated["is_valid_fresher_job"] = False
                 evaluated["rejection_reason"] = "Missing required skills/responsibilities"
-                pipeline_stage_counts["required_fields_rejected"] += 1
-                per_board_stages[source]["required_fields_rejected"] += 1
-                primary_rejection_counts["required_fields_rejected"] += 1
+                with _stats_lock:
+                    pipeline_stage_counts["required_fields_rejected"] += 1
+                    per_board_stages[source]["required_fields_rejected"] += 1
+                    primary_rejection_counts["required_fields_rejected"] += 1
+                    if source in per_board_primary_rejections:
+                        per_board_primary_rejections[source]["required_fields_rejected"] += 1
+                    overlapping_rejection_flags["required_fields_rejected"] += 1
+                    rejection_ledger.append({
+                        "job_id": str(evaluated.get("id") or evaluated.get("apply_url") or evaluated.get("title")),
+                        "board": source,
+                        "search_query": evaluated.get("search_query", ""),
+                        "search_location": evaluated.get("search_city", evaluated.get("location", "")),
+                        "title": evaluated.get("title", ""),
+                        "company": evaluated.get("company", ""),
+                        "primary_reason": "required_fields_rejected",
+                        "all_reasons": ["required_fields_rejected"],
+                    })
+                    rejected_jobs.append(evaluated)
+                return
+
+            with _stats_lock:
+                pipeline_stage_counts["final_approved"] += 1
+                per_board_stages[source]["final_approved"] += 1
+                valid_jobs.append(evaluated)
+        elif evaluated.get("needs_review"):
+            with _stats_lock:
+                pipeline_stage_counts["experience_manual_review"] += 1
+                per_board_stages[source]["experience_manual_review"] += 1
+                review_jobs.append(evaluated)
+        else:
+            # Deterministic rejection: categorize overlapping flags and assign primary reason by precedence
+            reasons_str = str(evaluated.get("rejection_reason", "")).lower()
+            flags = []
+            with _stats_lock:
+                # 1. Freshness / Too Old
+                if (not evaluated.get("date_freshness_verified", True)) or any(x in reasons_str for x in ("freshness", "hours", "old", "posted")):
+                    pipeline_stage_counts["too_old"] += 1
+                    per_board_stages[source]["too_old"] += 1
+                    overlapping_rejection_flags["too_old"] += 1
+                    flags.append("too_old")
+
+                # 2. Location Rejected
+                if "location" in reasons_str or "city" in reasons_str:
+                    pipeline_stage_counts["location_rejected"] += 1
+                    per_board_stages[source]["location_rejected"] += 1
+                    overlapping_rejection_flags["location_rejected"] += 1
+                    flags.append("location_rejected")
+
+                # 3. Experience Rejected
+                if "experience" in reasons_str or "experienced" in reasons_str:
+                    pipeline_stage_counts["experience_rejected"] += 1
+                    per_board_stages[source]["experience_rejected"] += 1
+                    overlapping_rejection_flags["experience_rejected"] += 1
+                    flags.append("experience_rejected")
+
+                # 4. Company Legitimacy / Scam / Blacklist
+                if "company" in reasons_str or "scam" in reasons_str or "blacklist" in reasons_str or "institute" in reasons_str:
+                    pipeline_stage_counts["company_legitimacy_rejected"] += 1
+                    per_board_stages[source]["company_legitimacy_rejected"] += 1
+                    overlapping_rejection_flags["company_legitimacy_rejected"] += 1
+                    flags.append("company_legitimacy_rejected")
+
+                # 5. Role Rejected / Unmatched
+                if "role" in reasons_str or "unmatched" in reasons_str or "category" in reasons_str:
+                    pipeline_stage_counts["role_rejected"] += 1
+                    per_board_stages[source]["role_rejected"] += 1
+                    overlapping_rejection_flags["role_rejected"] += 1
+                    flags.append("role_rejected")
+
+                # 6. Required Fields (URL, etc.)
+                if "url" in reasons_str or "apply" in reasons_str or "missing" in reasons_str:
+                    pipeline_stage_counts["required_fields_rejected"] += 1
+                    per_board_stages[source]["required_fields_rejected"] += 1
+                    overlapping_rejection_flags["required_fields_rejected"] += 1
+                    flags.append("required_fields_rejected")
+
+                # Deterministic primary rejection hierarchy (strictly mutually exclusive):
+                # 1. too_old > 2. location_rejected > 3. experience_rejected > 4. company_legitimacy_rejected > 5. role_rejected > 6. required_fields_rejected
+                precedence = [
+                    "too_old",
+                    "location_rejected",
+                    "experience_rejected",
+                    "company_legitimacy_rejected",
+                    "role_rejected",
+                    "required_fields_rejected",
+                ]
+                primary_reason = None
+                for p in precedence:
+                    if p in flags:
+                        primary_reason = p
+                        break
+                if not primary_reason:
+                    primary_reason = "required_fields_rejected"
+                    flags.append("required_fields_rejected")
+
+                primary_rejection_counts[primary_reason] += 1
                 if source in per_board_primary_rejections:
-                    per_board_primary_rejections[source]["required_fields_rejected"] += 1
-                overlapping_rejection_flags["required_fields_rejected"] += 1
+                    per_board_primary_rejections[source][primary_reason] += 1
+
                 rejection_ledger.append({
                     "job_id": str(evaluated.get("id") or evaluated.get("apply_url") or evaluated.get("title")),
                     "board": source,
@@ -1128,101 +1265,16 @@ def scrape_fresher_jobs(
                     "search_location": evaluated.get("search_city", evaluated.get("location", "")),
                     "title": evaluated.get("title", ""),
                     "company": evaluated.get("company", ""),
-                    "primary_reason": "required_fields_rejected",
-                    "all_reasons": ["required_fields_rejected"],
+                    "primary_reason": primary_reason,
+                    "all_reasons": flags,
                 })
+
                 rejected_jobs.append(evaluated)
-                continue
 
-            pipeline_stage_counts["final_approved"] += 1
-            per_board_stages[source]["final_approved"] += 1
-            valid_jobs.append(evaluated)
-        elif evaluated.get("needs_review"):
-            pipeline_stage_counts["experience_manual_review"] += 1
-            per_board_stages[source]["experience_manual_review"] += 1
-            review_jobs.append(evaluated)
-        else:
-            # Deterministic rejection: categorize overlapping flags and assign primary reason by precedence
-            reasons_str = str(evaluated.get("rejection_reason", "")).lower()
-            flags = []
-
-            # 1. Freshness / Too Old
-            if (not evaluated.get("date_freshness_verified", True)) or any(x in reasons_str for x in ("freshness", "hours", "old", "posted")):
-                pipeline_stage_counts["too_old"] += 1
-                per_board_stages[source]["too_old"] += 1
-                overlapping_rejection_flags["too_old"] += 1
-                flags.append("too_old")
-
-            # 2. Location Rejected
-            if "location" in reasons_str or "city" in reasons_str:
-                pipeline_stage_counts["location_rejected"] += 1
-                per_board_stages[source]["location_rejected"] += 1
-                overlapping_rejection_flags["location_rejected"] += 1
-                flags.append("location_rejected")
-
-            # 3. Experience Rejected
-            if "experience" in reasons_str or "experienced" in reasons_str:
-                pipeline_stage_counts["experience_rejected"] += 1
-                per_board_stages[source]["experience_rejected"] += 1
-                overlapping_rejection_flags["experience_rejected"] += 1
-                flags.append("experience_rejected")
-
-            # 4. Company Legitimacy / Scam / Blacklist
-            if "company" in reasons_str or "scam" in reasons_str or "blacklist" in reasons_str or "institute" in reasons_str:
-                pipeline_stage_counts["company_legitimacy_rejected"] += 1
-                per_board_stages[source]["company_legitimacy_rejected"] += 1
-                overlapping_rejection_flags["company_legitimacy_rejected"] += 1
-                flags.append("company_legitimacy_rejected")
-
-            # 5. Role Rejected / Unmatched
-            if "role" in reasons_str or "unmatched" in reasons_str or "category" in reasons_str:
-                pipeline_stage_counts["role_rejected"] += 1
-                per_board_stages[source]["role_rejected"] += 1
-                overlapping_rejection_flags["role_rejected"] += 1
-                flags.append("role_rejected")
-
-            # 6. Required Fields (URL, etc.)
-            if "url" in reasons_str or "apply" in reasons_str or "missing" in reasons_str:
-                pipeline_stage_counts["required_fields_rejected"] += 1
-                per_board_stages[source]["required_fields_rejected"] += 1
-                overlapping_rejection_flags["required_fields_rejected"] += 1
-                flags.append("required_fields_rejected")
-
-            # Deterministic primary rejection hierarchy (strictly mutually exclusive):
-            # 1. too_old > 2. location_rejected > 3. experience_rejected > 4. company_legitimacy_rejected > 5. role_rejected > 6. required_fields_rejected
-            precedence = [
-                "too_old",
-                "location_rejected",
-                "experience_rejected",
-                "company_legitimacy_rejected",
-                "role_rejected",
-                "required_fields_rejected",
-            ]
-            primary_reason = None
-            for p in precedence:
-                if p in flags:
-                    primary_reason = p
-                    break
-            if not primary_reason:
-                primary_reason = "required_fields_rejected"
-                flags.append("required_fields_rejected")
-
-            primary_rejection_counts[primary_reason] += 1
-            if source in per_board_primary_rejections:
-                per_board_primary_rejections[source][primary_reason] += 1
-
-            rejection_ledger.append({
-                "job_id": str(evaluated.get("id") or evaluated.get("apply_url") or evaluated.get("title")),
-                "board": source,
-                "search_query": evaluated.get("search_query", ""),
-                "search_location": evaluated.get("search_city", evaluated.get("location", "")),
-                "title": evaluated.get("title", ""),
-                "company": evaluated.get("company", ""),
-                "primary_reason": primary_reason,
-                "all_reasons": flags,
-            })
-
-            rejected_jobs.append(evaluated)
+    if unique_candidates:
+        eval_workers = max(1, min(3, len(unique_candidates)))
+        with ThreadPoolExecutor(max_workers=eval_workers) as eval_executor:
+            list(eval_executor.map(_process_candidate, unique_candidates))
 
     elapsed = time.time() - start_time
 
@@ -1263,7 +1315,7 @@ def scrape_fresher_jobs(
             "duplicate_url": pipeline_stage_counts["duplicate_url"],
             "duplicate_composite": pipeline_stage_counts["duplicate_composite"],
             "unique_pipeline_input": pipeline_stage_counts["pipeline_input"],
-            "raw_records_reconciled": total_scraped == (pipeline_stage_counts["duplicate_url"] + pipeline_stage_counts["duplicate_composite"] + pipeline_stage_counts["pipeline_input"]),
+            "raw_records_reconciled": total_scraped == (pipeline_stage_counts["duplicate_url"] + pipeline_stage_counts["duplicate_composite"] + pipeline_stage_counts["already_synced_skipped"] + pipeline_stage_counts["pipeline_input"]),
             "unique_jobs_reconciled": pipeline_stage_counts["pipeline_input"] == (len(rejected_jobs) + len(review_jobs) + len(valid_jobs)),
             "rejections_reconciled": len(rejected_jobs) == sum(primary_rejection_counts.values()),
         },

@@ -556,6 +556,32 @@ def sync_to_live_google_sheet(
         return False
 
 
+def get_existing_sheet_job_urls() -> set:
+    """Return normalized lowercase Apply URLs already present in Sheet1, or empty set on skip/error."""
+    spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
+    if not spreadsheet_id or spreadsheet_id == "YOUR_GOOGLE_SHEET_ID_HERE":
+        return set()
+    if not os.path.exists(CREDENTIALS_FILE):
+        return set()
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ]
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(spreadsheet_id)
+        ws_jobs = _get_jobs_worksheet(sheet)
+        header_row = _find_jobs_header_row(ws_jobs) or 3
+        col_vals = ws_jobs.col_values(9)[header_row:]  # Column I = Apply URL
+        return {str(u).strip().casefold() for u in col_vals if str(u).strip().startswith("http")}
+    except Exception as exc:
+        print(f"[*] Could not pre-load Sheet1 URLs for early dedup (continuing normally): {exc}")
+        return set()
+
+
 def sync_configured_google_sheet(
     jobs: List[Dict[str, Any]],
     hr_leads: Optional[List[Dict[str, Any]]] = None,
