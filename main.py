@@ -301,12 +301,17 @@ def main():
         print(f"\n[!] {report.headline().split('—')[1].strip()}")
 
     # 2a. Upsert this run's jobs into the live sheet FIRST so verified jobs are never lost to timeouts.
+    newly_synced_jobs = []
     if getattr(args, "diagnostic_only", False):
         print("\n[✓] Diagnostic-only mode active: Google Sheets sync was completely skipped.")
         synced = None
         sync_failed = False
     else:
-        synced = sync_configured_google_sheet(valid_jobs, hr_leads=hr_leads)
+        synced = sync_configured_google_sheet(
+            valid_jobs,
+            hr_leads=hr_leads,
+            newly_added_out=newly_synced_jobs,
+        )
         sync_failed = synced is False
         if sync_failed:
             print("[!] Google Sheets sync did not complete; local exports are still available.")
@@ -338,6 +343,26 @@ def main():
                 )
         except Exception as exc:
             print(f"[!] Interview prep generation encountered an error: {exc}")
+
+    # 2c. Send Brevo Dynamic Job Alert Digest for genuinely newly added Sheet1 rows
+    if synced is True and newly_synced_jobs and not getattr(args, "diagnostic_only", False):
+        try:
+            from brevo_notifier import send_job_alert_digest
+            brevo_res = send_job_alert_digest(newly_synced_jobs)
+            if brevo_res.get("sent"):
+                print(
+                    f"[✓] Brevo Alert: Sent {brevo_res.get('jobs_count')} new job(s) "
+                    f"to {brevo_res.get('recipients')} student(s) ({brevo_res.get('batches')} batch(es))."
+                )
+            else:
+                print(
+                    f"[*] Brevo Alert status: {brevo_res.get('reason')} "
+                    f"({brevo_res.get('errors') or brevo_res.get('error') or 'skipped'})"
+                )
+        except Exception as exc:
+            print(f"[!] Brevo alert notification encountered an error: {exc}")
+    elif synced is True and not newly_synced_jobs:
+        print("[*] Brevo Alert skipped: 0 brand-new jobs added to Google Sheets in this run.")
 
     # 2. Save Rejected Jobs Log (for transparency and audit)
     if rejected_jobs:

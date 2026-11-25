@@ -46,6 +46,12 @@ jobs:
       # Google Drive Upload Integration
       GDRIVE_UPLOAD_URL: ${{ secrets.GDRIVE_UPLOAD_URL || 'https://script.google.com/macros/s/AKfycbxdnDqgef2bf570oe13cmFtZg819lmv8NQNQqyYky_-jhJFPq_WRHS0zOUmMVKts8Zlsg/exec' }}
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID || '10VvfeWYKf0fTVuihc8nWYSpeipVZwSiz' }}
+      # Brevo Student Job Alert Automation
+      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      BREVO_LIST_ID: ${{ secrets.BREVO_LIST_ID || '477' }}
+      BREVO_TEMPLATE_ID: ${{ secrets.BREVO_TEMPLATE_ID || '379' }}
+      BREVO_SENDER_EMAIL: ${{ secrets.BREVO_SENDER_EMAIL || 'sandeepjethani4@gmail.com' }}
+      BREVO_SENDER_NAME: ${{ secrets.BREVO_SENDER_NAME || 'Quantum Learnings' }}
 
     steps:
       - name: Verify Google Sheets secrets are configured

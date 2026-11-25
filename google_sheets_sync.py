@@ -395,6 +395,7 @@ def sync_to_live_google_sheet(
     jobs: Optional[List[Dict[str, Any]]] = None,
     hr_leads: Optional[List[Dict[str, Any]]] = None,
     require_salary: bool = False,
+    newly_added_out: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """
     Syncs verified jobs and HR leads directly to the live Google Sheet via Google API.
@@ -458,6 +459,50 @@ def sync_to_live_google_sheet(
         )
         existing_rows = ws_jobs.get(f"A{data_start_row}:R")
         merged_rows = merge_job_rows(existing_rows, jobs_rows) if (jobs_rows or existing_rows) else existing_rows
+
+        if newly_added_out is not None and jobs_rows:
+            def _row_key(r: List[Any]) -> tuple:
+                u = str(r[8] or "").strip().casefold() if len(r) > 8 else ""
+                if u:
+                    return ("url", u)
+                return (
+                    "job",
+                    str(r[0] or "").strip().casefold() if len(r) > 0 else "",
+                    str(r[1] or "").strip().casefold() if len(r) > 1 else "",
+                    str(r[2] or "").strip().casefold() if len(r) > 2 else "",
+                )
+
+            existing_keys = {_row_key(r) for r in existing_rows if r}
+            jobs_by_key: Dict[tuple, Dict[str, Any]] = {}
+            for jd in jobs_data:
+                ju = str(jd.get("apply_url") or jd.get("job_url_direct") or jd.get("job_url") or "").strip().casefold()
+                jk = ("url", ju) if ju else (
+                    "job",
+                    str(jd.get("title") or "").strip().casefold(),
+                    str(jd.get("company") or "").strip().casefold(),
+                    str(jd.get("location") or "").strip().casefold(),
+                )
+                jobs_by_key.setdefault(jk, jd)
+
+            seen_new = set()
+            for inc_row in jobs_rows:
+                if not is_valid_sheet_row(inc_row):
+                    continue
+                rk = _row_key(inc_row)
+                if rk not in existing_keys and rk not in seen_new:
+                    seen_new.add(rk)
+                    if rk in jobs_by_key:
+                        newly_added_out.append(jobs_by_key[rk])
+                    else:
+                        newly_added_out.append({
+                            "title": inc_row[0],
+                            "company": inc_row[1],
+                            "location": inc_row[2],
+                            "min_amount": inc_row[6],
+                            "max_amount": inc_row[7],
+                            "apply_url": inc_row[8],
+                            "interview_doc_url": inc_row[12] if len(inc_row) > 12 else "",
+                        })
         if jobs_rows or any(len(r) == 14 for r in existing_rows):
             ws_jobs.batch_clear([f"A{data_start_row}:R"])
             if merged_rows:
@@ -515,13 +560,20 @@ def sync_configured_google_sheet(
     jobs: List[Dict[str, Any]],
     hr_leads: Optional[List[Dict[str, Any]]] = None,
     require_salary: bool = False,
+    newly_added_out: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[bool]:
     """Sync the latest run when a spreadsheet ID is configured; None means disabled."""
     spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
     if not spreadsheet_id or spreadsheet_id == "YOUR_GOOGLE_SHEET_ID_HERE":
         print("[*] Google Sheets sync skipped: GOOGLE_SPREADSHEET_ID is not configured.")
         return None
-    return sync_to_live_google_sheet(spreadsheet_id, jobs=jobs, hr_leads=hr_leads, require_salary=require_salary)
+    return sync_to_live_google_sheet(
+        spreadsheet_id,
+        jobs=jobs,
+        hr_leads=hr_leads,
+        require_salary=require_salary,
+        newly_added_out=newly_added_out,
+    )
 
 if __name__ == "__main__":
     import argparse
