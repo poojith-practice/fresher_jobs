@@ -15,7 +15,7 @@ import os
 import sys
 import json
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Union
 
 try:
@@ -36,6 +36,37 @@ CREDENTIALS_FILE = os.getenv(
     "GOOGLE_SERVICE_ACCOUNT_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json"),
 )
+
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+
+def _normalize_date_display(value: Any) -> str:
+    """Normalize ISO-8601 timestamps (e.g. MonsterIndia UTC) to clean YYYY-MM-DD."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    if isinstance(value, datetime):
+        dt = value.astimezone(_IST_TZ) if value.tzinfo is not None else value
+        return dt.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "nat", "none", "null"}:
+        return ""
+    # Already YYYY-MM-DD
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    # Parse ISO-8601 datetime strings (e.g. 2026-11-25T17:21:19+00:00 or ...Z)
+    if "T" in s or ("-" in s and ":" in s):
+        try:
+            iso_str = s[:-1] + "+00:00" if s.endswith("Z") else s
+            dt = datetime.fromisoformat(iso_str)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(_IST_TZ)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return s
+
 
 def format_jobs_rows(
     jobs: List[Dict[str, Any]],
@@ -87,7 +118,7 @@ def format_jobs_rows(
         company = html.unescape(str(cell(j.get("company") or j.get("Company")))).strip()
         location = html.unescape(str(cell(j.get("location") or j.get("Location")))).strip()
         category = html.unescape(str(cell(j.get("tech_category") or j.get("role") or j.get("Role")))).strip()
-        date_p = str(cell(j.get("date_posted") or j.get("Date Posted") or j.get("published_at"))).strip()
+        date_p = _normalize_date_display(cell(j.get("date_posted") or j.get("Date Posted") or j.get("published_at")))
         exp = str(cell(j.get("experience_range") or j.get("experience") or j.get("Experience"))).strip()
         
         # FIX 2: Validate raw salary values BEFORE converting them to display placeholders.
@@ -284,6 +315,8 @@ def merge_job_rows(
         if len(row_list) == 14:
             row_list = row_list[:13] + parse_legacy_hr_details(row_list[13])
         padded = (row_list + [""] * width)[:width]
+        if str(padded[4] or "").strip():
+            padded[4] = _normalize_date_display(padded[4])
         for col_idx in range(13, 18):
             if not str(padded[col_idx] or "").strip():
                 padded[col_idx] = "not found"
