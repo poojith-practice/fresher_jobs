@@ -125,8 +125,17 @@ def format_jobs_rows(
         if not skills or len(skills.strip()) < 3:
             skills = "Technical skills and requirements detailed in job listing"
 
-        hr_details = str(cell(j.get("hr_details") or j.get("HR Details") or "")).strip()
-        if not hr_details and enrich_hr and company:
+        hr_name = str(cell(j.get("hr_name") or j.get("HR Name") or "")).strip()
+        hr_role = str(cell(j.get("hr_role") or j.get("hr_title") or j.get("HR Role") or "")).strip()
+        hr_email = str(cell(j.get("hr_email") or j.get("HR Email") or "")).strip()
+        hr_phone = str(cell(j.get("hr_phone") or j.get("HR Phone") or "")).strip()
+        hr_linkedin = str(cell(j.get("hr_linkedin") or j.get("HR LinkedIn") or "")).strip()
+
+        legacy_hr = str(cell(j.get("hr_details") or j.get("HR Details") or "")).strip()
+        if legacy_hr and not any([hr_name, hr_role, hr_email, hr_phone, hr_linkedin]):
+            hr_name, hr_role, hr_email, hr_phone, hr_linkedin = parse_legacy_hr_details(legacy_hr)
+
+        if not any(v and v.lower() != "not found" for v in [hr_name, hr_role, hr_email, hr_phone, hr_linkedin]) and enrich_hr and company:
             try:
                 from rocketreach_client import RocketReachClient
                 rr_client = getattr(format_jobs_rows, "_rr_client", None)
@@ -134,11 +143,19 @@ def format_jobs_rows(
                     rr_client = RocketReachClient()
                     format_jobs_rows._rr_client = rr_client
                 hr_data = rr_client.enrich_company_hr(company)
-                hr_details = hr_data.get("display_text") or "Not found from RocketReach"
+                hr_name = str(hr_data.get("hr_name") or "").strip()
+                hr_role = str(hr_data.get("hr_title") or "").strip()
+                hr_email = str(hr_data.get("hr_email") or "").strip()
+                hr_phone = str(hr_data.get("hr_phone") or "").strip()
+                hr_linkedin = str(hr_data.get("hr_linkedin") or "").strip()
             except Exception:
-                hr_details = "Not found from RocketReach"
-        if not hr_details:
-            hr_details = "Not found from RocketReach"
+                pass
+
+        hr_name = hr_name or "not found"
+        hr_role = hr_role or "not found"
+        hr_email = hr_email or "not found"
+        hr_phone = hr_phone or "not found"
+        hr_linkedin = hr_linkedin or "not found"
 
         # STRICT QUALITY GATEKEEPER ACCOUNTING:
         # Every single field must be present, valid, and complete before pushing to the Google Sheet.
@@ -183,7 +200,7 @@ def format_jobs_rows(
         rows.append([
             title, company, location, category, date_p, exp,
             min_sal, max_sal, apply_url, source, last_updated,
-            skills, interview_doc, hr_details
+            skills, interview_doc, hr_name, hr_role, hr_email, hr_phone, hr_linkedin
         ])
         diagnostics["rows_formatted"] += 1
 
@@ -219,17 +236,56 @@ def is_valid_sheet_row(row: List[Any]) -> bool:
     return True
 
 
+def parse_legacy_hr_details(text: Any) -> List[str]:
+    """Splits legacy 'Name (Role) | Email: ... | Phone: ... | LinkedIn: ...' into 5 columns."""
+    import re
+    raw = str(text or "").strip()
+    if not raw or "not found" in raw.lower():
+        return ["not found", "not found", "not found", "not found", "not found"]
+
+    hr_name = hr_role = hr_email = hr_phone = hr_linkedin = ""
+    parts = [p.strip() for p in raw.split("|") if p.strip()]
+    for idx, part in enumerate(parts):
+        low = part.lower()
+        if low.startswith("email:"):
+            hr_email = part.split(":", 1)[1].strip()
+        elif low.startswith("phone:"):
+            hr_phone = part.split(":", 1)[1].strip()
+        elif low.startswith("linkedin:"):
+            hr_linkedin = part.split(":", 1)[1].strip()
+        elif idx == 0:
+            m = re.match(r"^(.*?)\s*\(([^()]+)\)\s*$", part)
+            if m:
+                hr_name = m.group(1).strip()
+                hr_role = m.group(2).strip()
+            else:
+                hr_name = part
+
+    def _clean(val: str) -> str:
+        return val if val and val.lower() not in {"none", "null", "nan"} else "not found"
+
+    return [_clean(hr_name), _clean(hr_role), _clean(hr_email), _clean(hr_phone), _clean(hr_linkedin)]
+
+
 def merge_job_rows(
     existing_rows: List[List[Any]],
     incoming_rows: List[List[Any]],
 ) -> List[List[Any]]:
     """Upsert incoming jobs by Apply URL, purging any corrupted/incomplete historical rows."""
-    width = 14
+    width = 18
     merged: List[List[Any]] = []
     row_index_by_key: Dict[tuple, int] = {}
 
     def normalized(row: List[Any]) -> List[Any]:
-        return (list(row) + [""] * width)[:width]
+        row_list = list(row)
+        # Migrate legacy 14-column row (where col 13 is combined 'HR Details') into 18 columns (N:R)
+        if len(row_list) == 14:
+            row_list = row_list[:13] + parse_legacy_hr_details(row_list[13])
+        padded = (row_list + [""] * width)[:width]
+        for col_idx in range(13, 18):
+            if not str(padded[col_idx] or "").strip():
+                padded[col_idx] = "not found"
+        return padded
 
     def key(row: List[Any]) -> tuple:
         url = str(row[8] or "").strip().casefold()
@@ -269,10 +325,13 @@ def merge_job_rows(
             existing_doc = str(merged[existing_index][12] or "").strip()
             if row[12] and (str(row[12]).strip().startswith("http") or not existing_doc.startswith("http")):
                 merged[existing_index][12] = row[12]
-            if len(row) > 13 and row[13] and row[13] != "Not found from RocketReach":
-                merged[existing_index][13] = row[13]
-            elif len(merged[existing_index]) > 13 and not merged[existing_index][13] and len(row) > 13:
-                merged[existing_index][13] = row[13]
+            for col_idx in range(13, 18):
+                inc_val = str(row[col_idx] or "").strip()
+                cur_val = str(merged[existing_index][col_idx] or "").strip()
+                if inc_val and inc_val.lower() not in {"not found", "not found from rocketreach"}:
+                    merged[existing_index][col_idx] = inc_val
+                elif not cur_val:
+                    merged[existing_index][col_idx] = "not found"
             merged[existing_index][10] = row[10]
     return merged
 
@@ -388,26 +447,27 @@ def sync_to_live_google_sheet(
         job_headers = [[
             "Job Title", "Company", "Location", "Role", "Date Posted", "Experience",
             "Min Salary", "Max Salary", "Apply URL", "Source", "Last Updated",
-            "skills/responsibilities", "Interview QnA doc", "HR Details"
+            "skills/responsibilities", "Interview QnA doc",
+            "HR Name", "HR Role", "HR Email", "HR Phone", "HR LinkedIn",
         ]]
         ws_jobs.update(
             values=job_headers,
-            range_name=f"A{header_row}:N{header_row}",
+            range_name=f"A{header_row}:R{header_row}",
         )
-        existing_rows = ws_jobs.get(f"A{data_start_row}:N")
-        merged_rows = merge_job_rows(existing_rows, jobs_rows) if jobs_rows else existing_rows
-        if jobs_rows:
-            ws_jobs.batch_clear([f"A{data_start_row}:N"])
+        existing_rows = ws_jobs.get(f"A{data_start_row}:R")
+        merged_rows = merge_job_rows(existing_rows, jobs_rows) if (jobs_rows or existing_rows) else existing_rows
+        if jobs_rows or any(len(r) == 14 for r in existing_rows):
+            ws_jobs.batch_clear([f"A{data_start_row}:R"])
             if merged_rows:
                 last_row = data_start_row + len(merged_rows) - 1
                 ws_jobs.update(
                     values=merged_rows,
-                    range_name=f"A{data_start_row}:N{last_row}",
+                    range_name=f"A{data_start_row}:R{last_row}",
                 )
-        # Remove legacy columns beyond column N (14th column).
+        # Remove legacy columns beyond column R (18th column).
         trailing_headers = [
             str(value).strip().casefold()
-            for value in ws_jobs.row_values(header_row)[14:20]
+            for value in ws_jobs.row_values(header_row)[18:24]
         ]
         legacy_columns = {
             "score", "job requirement", "fresher/exp",
@@ -415,7 +475,7 @@ def sync_to_live_google_sheet(
             "prior experience required",
         }
         if any(value in legacy_columns for value in trailing_headers):
-            ws_jobs.delete_columns(14, 19)
+            ws_jobs.delete_columns(19, 24)
         print(
             f"[✓] Direct Sync: Upserted {len(jobs_rows)} incoming jobs; "
             f"{len(merged_rows)} total rows in tab '{ws_jobs.title}'."

@@ -355,3 +355,43 @@ def test_merge_sheet_rows_preserves_existing_drive_url():
     incoming_real[12] = new_url
     merged2 = merge_job_rows([base], [incoming_real])
     assert merged2[0][12] == new_url
+
+
+def test_split_hr_columns_and_legacy_migration():
+    from google_sheets_sync import parse_legacy_hr_details, merge_job_rows, format_jobs_rows
+
+    assert parse_legacy_hr_details(
+        "Reema Prasad (Talent Acquisition Lead) | Email: reema@hitachi.com | LinkedIn: https://linkedin.com/in/reema"
+    ) == ["Reema Prasad", "Talent Acquisition Lead", "reema@hitachi.com", "not found", "https://linkedin.com/in/reema"]
+
+    assert parse_legacy_hr_details("Not found from RocketReach") == ["not found"] * 5
+
+    legacy_row = [
+        "Software Engineer", "Hitachi", "Bangalore", "Software Engineer",
+        "2026-11-25", "0-1 Yrs", "Competitive", "Competitive",
+        "https://example.com/job/101", "LINKEDIN", "2026-11-25 10:00", "Python, SQL",
+        "https://drive.google.com/file/d/doc/view",
+        "Akhil Nair (Campus Recruiter) | Email: akhil@ey.com | LinkedIn: https://linkedin.com/in/akhil",
+    ]
+    migrated = merge_job_rows([legacy_row], [])
+    assert len(migrated) == 1
+    assert len(migrated[0]) == 18
+    assert migrated[0][13:18] == ["Akhil Nair", "Campus Recruiter", "akhil@ey.com", "not found", "https://linkedin.com/in/akhil"]
+
+    rows = format_jobs_rows([{
+        "title": "Software Engineer",
+        "company": "Acme",
+        "location": "Bangalore",
+        "tech_category": "Software Engineer",
+        "date_posted": "2026-11-25",
+        "experience_range": "0-1 Yrs",
+        "apply_url": "https://example.com/job/102",
+        "site": "linkedin",
+        "skills_requirements": "Python",
+        "llm_verified": True,
+        "llm_eligible": True,
+        "hr_name": "Jane Doe",
+        "hr_role": "Technical Recruiter",
+    }], require_salary=False, enrich_hr=False)
+    assert len(rows[0]) == 18
+    assert rows[0][13:18] == ["Jane Doe", "Technical Recruiter", "not found", "not found", "not found"]
