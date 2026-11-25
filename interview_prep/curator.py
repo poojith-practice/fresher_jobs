@@ -155,7 +155,7 @@ class CuratorError(RuntimeError):
     """Raised when a question pack cannot be produced (fail-closed)."""
 
 
-def _call_llm(llm: Any, messages: list, max_tokens: int = 6500) -> str:
+def _call_llm(llm: Any, messages: list, max_tokens: int = 4500) -> str:
     """Invoke an LLM, tolerating clients whose invoke() ignores max_tokens."""
     try:
         response = llm.invoke(messages, max_tokens=max_tokens)
@@ -390,7 +390,7 @@ def build_interview_pack(job: dict, context: dict, llm: Any) -> dict:
         HumanMessage(content=user_content),
     ]
 
-    raw = _call_llm(llm, messages, max_tokens=6500)
+    raw = _call_llm(llm, messages, max_tokens=4500)
     parsed = _extract_json(raw)
     if parsed is None:
         logger.warning("Curator output did not contain parseable JSON; raw response:\n%s", raw[:300])
@@ -403,7 +403,7 @@ def build_interview_pack(job: dict, context: dict, llm: Any) -> dict:
         messages.append(HumanMessage(
             content="The previous pack had too few usable questions. Regenerate the FULL JSON with AT LEAST 15 questions, exactly the same schema, and nothing else."
         ))
-        raw = _call_llm(llm, messages, max_tokens=6500)
+        raw = _call_llm(llm, messages, max_tokens=4500)
         parsed2 = _extract_json(raw)
         if parsed2 is None:
             raise

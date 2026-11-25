@@ -11,6 +11,8 @@ Acts as the final intelligent gatekeeper for fresher jobs:
 import os
 import re
 import json
+import time
+import threading
 import logging
 from typing import Dict, Any, Optional, Tuple
 from bs4 import BeautifulSoup
@@ -59,15 +61,17 @@ def get_openrouter_keys() -> list:
 
 class RotatingLLM:
     """
-    Multi-provider, multi-key rotating LLM client with automatic failover.
+    Multi-provider, multi-key rotating LLM client with automatic failover & cooldowns.
     Sequentially rotates through OpenRouter keys (1 -> 2 -> 3) first.
-    If all OpenRouter keys are exhausted, seamlessly falls back to Groq keys (1 -> 2 -> 3).
-    When an API key encounters rate limits, errors, or timeouts on a job, it DOES NOT abandon
-    the job: it immediately retries the EXACT SAME JOB with the next active key until success
-    or all available provider keys are exhausted.
+    If OpenRouter keys are cooling down on 429, seamlessly falls back to Groq keys (1 -> 2 -> 3).
+    Never permanently kills a provider on transient 429 rate-limits; instead applies per-key
+    cooldowns so keys recover automatically on subsequent calls, and falls back across Groq
+    models when a model hits an output-tokens-per-minute (OTPM) cap.
     """
 
-    def __init__(self):
+    GROQ_LARGE_OUTPUT_FALLBACKS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+
+    def __init__(self, cooldown_seconds: float = 65.0, max_cooldown_wait: float = 70.0):
         self.openrouter_keys = get_openrouter_keys()
         self.groq_keys = get_groq_keys()
         self.active_openrouter_idx = 0
@@ -76,9 +80,33 @@ class RotatingLLM:
         self.groq_exhausted = False
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
         self.groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+        self.cooldown_seconds = cooldown_seconds
+        self.max_cooldown_wait = max_cooldown_wait
+        self._lock = threading.Lock()
+        self._openrouter_cooldowns: Dict[int, float] = {}
+        self._groq_cooldowns: Dict[int, float] = {}
 
     def has_keys(self) -> bool:
         return bool(self.openrouter_keys or self.groq_keys)
+
+    @staticmethod
+    def _is_permanent_auth_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(tok in msg for tok in ("401", "403", "invalid_api_key", "invalid api key", "unauthorized"))
+
+    @staticmethod
+    def _is_otpm_or_model_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(tok in msg for tok in ("otpm", "output tokens per minute", "reduce max_tokens", "model_not_found", "does not exist"))
+
+    def _groq_models_for(self, max_tokens: Optional[int]) -> list:
+        if max_tokens and max_tokens > 1000 and self.groq_model == "qwen/qwen3.8-27b":
+            return list(self.GROQ_LARGE_OUTPUT_FALLBACKS)
+        models = [self.groq_model]
+        for m in self.GROQ_LARGE_OUTPUT_FALLBACKS:
+            if m not in models:
+                models.append(m)
+        return models
 
     def invoke(self, messages: Any, max_tokens: Optional[int] = None) -> Any:
         from langchain_openai import ChatOpenAI
@@ -91,73 +119,115 @@ class RotatingLLM:
 
         last_exception = None
 
-        # 1. Iterate through configured OpenRouter keys first (1 -> 2 -> 3)
-        if self.openrouter_keys and not self.openrouter_exhausted:
-            start_idx = self.active_openrouter_idx % len(self.openrouter_keys)
-            for attempt in range(len(self.openrouter_keys)):
-                idx = (start_idx + attempt) % len(self.openrouter_keys)
-                curr_key = self.openrouter_keys[idx]
-                key_id = f"OpenRouter Key #{idx + 1}"
-                try:
-                    client = ChatOpenAI(
-                        api_key=curr_key,
-                        base_url="https://openrouter.ai/api/v1",
-                        model=self.openrouter_model,
-                        temperature=0.1,
-                        max_tokens=max_tokens or 600,
-                        model_kwargs={"reasoning": {"enabled": False}},
-                        default_headers={
-                            "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
-                            "X-Title": "Fresher Job Intelligence Scraper",
-                        },
-                    )
-                    res = client.invoke(messages)
-                    if not _extract_text(res):
-                        raise ValueError("OpenRouter returned empty response body")
-                    self.active_openrouter_idx = idx
-                    return res
-                except Exception as exc:
-                    last_exception = exc
-                    logger.warning(
-                        "[%s] Request failed: %s. Retrying same job with next key...",
-                        key_id, exc
-                    )
-                    self.active_openrouter_idx = (idx + 1) % len(self.openrouter_keys)
+        for round_num in range(2):
+            now = time.time()
 
-            logger.info("All %d configured OpenRouter keys exhausted. Shifting to Groq pool...", len(self.openrouter_keys))
-            self.openrouter_exhausted = True
+            # 1. Try OpenRouter keys not currently in cooldown
+            if self.openrouter_keys and not self.openrouter_exhausted:
+                with self._lock:
+                    start_idx = self.active_openrouter_idx % len(self.openrouter_keys)
+                    candidate_indices = [
+                        (start_idx + attempt) % len(self.openrouter_keys)
+                        for attempt in range(len(self.openrouter_keys))
+                        if self._openrouter_cooldowns.get((start_idx + attempt) % len(self.openrouter_keys), 0.0) <= now
+                    ]
 
-        # 2. Iterate through configured Groq keys as fallback (1 -> 2 -> 3)
-        if self.groq_keys and not self.groq_exhausted:
-            start_idx = self.active_groq_idx % len(self.groq_keys)
-            for attempt in range(len(self.groq_keys)):
-                idx = (start_idx + attempt) % len(self.groq_keys)
-                curr_key = self.groq_keys[idx]
-                key_id = f"Groq Key #{idx + 1}"
-                try:
-                    client = ChatOpenAI(
-                        api_key=curr_key,
-                        base_url="https://api.groq.com/openai/v1",
-                        model=self.groq_model,
-                        temperature=0.1,
-                        max_tokens=max_tokens or 600,
-                        model_kwargs={"reasoning_effort": "none"},
-                    )
-                    res = client.invoke(messages)
-                    if not _extract_text(res):
-                        raise ValueError("Groq returned empty response body")
-                    self.active_groq_idx = idx
-                    return res
-                except Exception as exc:
-                    last_exception = exc
-                    logger.warning(
-                        "[%s] Request failed: %s. Retrying same job with next key...",
-                        key_id, exc
-                    )
-                    self.active_groq_idx = (idx + 1) % len(self.groq_keys)
+                for idx in candidate_indices:
+                    curr_key = self.openrouter_keys[idx]
+                    key_id = f"OpenRouter Key #{idx + 1}"
+                    try:
+                        client = ChatOpenAI(
+                            api_key=curr_key,
+                            base_url="https://openrouter.ai/api/v1",
+                            model=self.openrouter_model,
+                            temperature=0.1,
+                            max_tokens=max_tokens or 600,
+                            model_kwargs={"reasoning": {"enabled": False}},
+                            default_headers={
+                                "HTTP-Referer": "https://github.com/placement-prep/fresher-job-scraper",
+                                "X-Title": "Fresher Job Intelligence Scraper",
+                            },
+                        )
+                        res = client.invoke(messages)
+                        if not _extract_text(res):
+                            raise ValueError("OpenRouter returned empty response body")
+                        with self._lock:
+                            self.active_openrouter_idx = idx
+                            self._openrouter_cooldowns.pop(idx, None)
+                        return res
+                    except Exception as exc:
+                        last_exception = exc
+                        logger.warning(
+                            "[%s] Request failed: %s. Rotating to next key...",
+                            key_id, exc
+                        )
+                        cd = 3600.0 if self._is_permanent_auth_error(exc) else self.cooldown_seconds
+                        with self._lock:
+                            self._openrouter_cooldowns[idx] = time.time() + cd
+                            self.active_openrouter_idx = (idx + 1) % len(self.openrouter_keys)
 
-            logger.info("All %d configured Groq keys exhausted.", len(self.groq_keys))
-            self.groq_exhausted = True
+            # 2. Try Groq keys not currently in cooldown (with OTPM model fallback)
+            if self.groq_keys and not self.groq_exhausted:
+                now = time.time()
+                with self._lock:
+                    start_idx = self.active_groq_idx % len(self.groq_keys)
+                    candidate_indices = [
+                        (start_idx + attempt) % len(self.groq_keys)
+                        for attempt in range(len(self.groq_keys))
+                        if self._groq_cooldowns.get((start_idx + attempt) % len(self.groq_keys), 0.0) <= now
+                    ]
+
+                groq_models = self._groq_models_for(max_tokens)
+                for idx in candidate_indices:
+                    curr_key = self.groq_keys[idx]
+                    key_id = f"Groq Key #{idx + 1}"
+                    for g_model in groq_models:
+                        try:
+                            client = ChatOpenAI(
+                                api_key=curr_key,
+                                base_url="https://api.groq.com/openai/v1",
+                                model=g_model,
+                                temperature=0.1,
+                                max_tokens=max_tokens or 600,
+                                model_kwargs={"reasoning_effort": "none"} if "qwen" in g_model else {},
+                            )
+                            res = client.invoke(messages)
+                            if not _extract_text(res):
+                                raise ValueError("Groq returned empty response body")
+                            with self._lock:
+                                self.active_groq_idx = idx
+                                self._groq_cooldowns.pop(idx, None)
+                            return res
+                        except Exception as exc:
+                            last_exception = exc
+                            if self._is_otpm_or_model_error(exc) and g_model != groq_models[-1]:
+                                logger.warning("[%s] Model %s hit OTPM/model limit (%s). Trying fallback model...", key_id, g_model, exc)
+                                continue
+                            logger.warning(
+                                "[%s] Request failed: %s. Rotating to next key...",
+                                key_id, exc
+                            )
+                            cd = 3600.0 if self._is_permanent_auth_error(exc) else self.cooldown_seconds
+                            with self._lock:
+                                self._groq_cooldowns[idx] = time.time() + cd
+                                self.active_groq_idx = (idx + 1) % len(self.groq_keys)
+                            break
+
+            # 3. If all keys are in temporary cooldown, wait once if within max_cooldown_wait
+            if round_num == 0 and self.max_cooldown_wait > 0:
+                now = time.time()
+                with self._lock:
+                    all_until = [
+                        t for t in (list(self._openrouter_cooldowns.values()) + list(self._groq_cooldowns.values()))
+                        if t > now and (t - now) <= self.max_cooldown_wait
+                    ]
+                if all_until:
+                    wait_s = min(all_until) - now + 0.5
+                    if 0 < wait_s <= self.max_cooldown_wait:
+                        logger.info("All LLM keys cooling down; waiting %.1fs for earliest rate-limit reset...", wait_s)
+                        time.sleep(wait_s)
+                        continue
+            break
 
         raise RuntimeError(f"All configured OpenRouter and Groq keys have been exhausted for this job! Last error: {last_exception}")
 

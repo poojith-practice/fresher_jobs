@@ -300,21 +300,7 @@ def main():
     if not valid_jobs and report.outcome == OUTCOME_NO_JOBS:
         print(f"\n[!] {report.headline().split('—')[1].strip()}")
 
-    # 2a. Generate Interview Preparation PDFs & Google Drive links for verified fresher jobs
-    if getattr(args, "with_interview_docs", True) and valid_jobs and not getattr(args, "diagnostic_only", False):
-        try:
-            from interview_prep.runner import run_interview_docs
-            print("\n[*] Generating Interview Prep Documents & Google Drive links for verified fresher jobs...")
-            interview_dir = os.path.join(output_dir, "interview_docs")
-            prep_stats = run_interview_docs(valid_jobs, output_base_dir=interview_dir)
-            print(
-                f"[✓] Interview Prep: {prep_stats['generated']} generated, "
-                f"{prep_stats['cached']} cached, {prep_stats['failed']} failed."
-            )
-        except Exception as exc:
-            print(f"[!] Interview prep generation encountered an error: {exc}")
-
-    # 2b. Upsert this run's jobs into the live sheet while retaining prior results.
+    # 2a. Upsert this run's jobs into the live sheet FIRST so verified jobs are never lost to timeouts.
     if getattr(args, "diagnostic_only", False):
         print("\n[✓] Diagnostic-only mode active: Google Sheets sync was completely skipped.")
         synced = None
@@ -324,6 +310,34 @@ def main():
         sync_failed = synced is False
         if sync_failed:
             print("[!] Google Sheets sync did not complete; local exports are still available.")
+
+    # 2b. Generate Interview Preparation PDFs & Google Drive links, then patch Column M in Sheet1
+    if getattr(args, "with_interview_docs", True) and not getattr(args, "diagnostic_only", False):
+        try:
+            from interview_prep.runner import run_interview_docs
+            interview_dir = os.path.join(output_dir, "interview_docs")
+            if valid_jobs:
+                print("\n[*] Generating Interview Prep Documents & Google Drive links for verified fresher jobs...")
+                prep_stats = run_interview_docs(valid_jobs, output_base_dir=interview_dir, sync_sheet=True)
+                print(
+                    f"[✓] Interview Prep: {prep_stats['generated']} generated, "
+                    f"{prep_stats['cached']} cached, {prep_stats['failed']} failed."
+                )
+            print("[*] Checking Google Sheet for any remaining 'Pending Generation' rows to backfill...")
+            backfill_stats = run_interview_docs(
+                from_sheet=True,
+                pending_only=True,
+                limit=20,
+                output_base_dir=interview_dir,
+                sync_sheet=True,
+            )
+            if backfill_stats["total_jobs"] > 0:
+                print(
+                    f"[✓] Pending Backfill: {backfill_stats['generated']} generated, "
+                    f"{backfill_stats['cached']} cached, {backfill_stats['failed']} failed."
+                )
+        except Exception as exc:
+            print(f"[!] Interview prep generation encountered an error: {exc}")
 
     # 2. Save Rejected Jobs Log (for transparency and audit)
     if rejected_jobs:

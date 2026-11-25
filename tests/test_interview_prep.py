@@ -263,3 +263,71 @@ def test_runner_with_mock_llm(tmp_path, monkeypatch):
     # Forced run: should regenerate
     stats3 = run_interview_docs(jobs, output_base_dir=tmp_path, force=True, llm=mock_llm)
     assert stats3["generated"] == 1
+
+
+def test_runner_pending_only_and_sync_sheet(tmp_path, monkeypatch):
+    valid_pack_json = json.dumps({
+        "role_summary": "Backend fundamentals and SQL.",
+        "questions": [
+            {
+                "question": f"Question #{i} about backend?",
+                "kind": "technical",
+                "origin": "role",
+                "answer_bullets": ["Point A", "Point B"],
+                "example": "Sample example",
+            }
+            for i in range(1, 13)
+        ],
+        "more_coding_questions": ["Two Sum"],
+    })
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = valid_pack_json
+    mock_llm.invoke.return_value = mock_response
+
+    monkeypatch.setattr(
+        "interview_prep.runner.gather_question_context",
+        lambda company, role, skills: {"company_excerpts": [], "role_excerpts": [], "skill_excerpts": [], "sources": []},
+    )
+    monkeypatch.setattr(
+        "interview_prep.runner.upload_pdf",
+        lambda path: {"drive_file_id": "abc123", "drive_url": "https://drive.google.com/file/d/abc123/view", "drive_status": "uploaded"},
+    )
+    synced_calls = []
+    monkeypatch.setattr(
+        "interview_prep.runner.sync_interview_docs_to_sheet",
+        lambda job_list: synced_calls.append(list(job_list)) or len(job_list),
+    )
+
+    jobs = [
+        {
+            "title": "Done Job",
+            "company": "AlreadyDoneCorp",
+            "tech_category": "Software Engineer",
+            "skills_requirements": "Python, SQL",
+            "apply_url": "https://example.com/done",
+            "interview_doc_url": "https://drive.google.com/file/d/existing/view",
+        },
+        {
+            "title": "Pending Job",
+            "company": "PendingCorp",
+            "tech_category": "Software Engineer",
+            "skills_requirements": "Python, SQL",
+            "apply_url": "https://example.com/pending",
+            "interview_doc_url": "Pending Generation",
+        },
+    ]
+
+    stats = run_interview_docs(
+        jobs,
+        output_base_dir=tmp_path,
+        llm=mock_llm,
+        pending_only=True,
+        sync_sheet=True,
+        max_workers=2,
+    )
+    assert stats["total_jobs"] == 1
+    assert stats["generated"] == 1
+    assert stats["sheet_rows_updated"] == 1
+    assert len(synced_calls) == 1
+    assert synced_calls[0][0]["interview_doc_url"] == "https://drive.google.com/file/d/abc123/view"

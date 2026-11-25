@@ -281,3 +281,79 @@ def test_rotating_llm_falls_back_to_groq_when_openrouter_exhausted(monkeypatch):
     res = rotator.invoke("test")
     assert "is_fresher_eligible" in res.content
     assert call_history == ["sk-or-v1-router_fail_all", "gsk_groq_success_1"]
+
+
+def test_rotating_llm_recovers_openrouter_after_cooldown(monkeypatch):
+    import time
+    from llm_verifier import RotatingLLM
+
+    monkeypatch.setenv("OPENROUTER_API_KEY1", "sk-or-v1-router_1")
+    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_1")
+    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    should_fail_or = {"flag": True}
+    used = []
+
+    class MockChatOpenAI:
+        def __init__(self, api_key, model="", **kwargs):
+            self.api_key = api_key
+            self.model = model
+
+        def invoke(self, messages):
+            used.append((self.api_key, self.model))
+            if self.api_key.startswith("sk-or-") and should_fail_or["flag"]:
+                raise RuntimeError("429 Too Many Requests")
+            class Resp:
+                content = '{"ok": true}'
+            return Resp()
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", MockChatOpenAI)
+
+    rotator = RotatingLLM(cooldown_seconds=0.05, max_cooldown_wait=0.0)
+    # 1st call: OpenRouter 429s -> falls back to Groq, OpenRouter NOT permanently exhausted
+    rotator.invoke("msg1")
+    assert rotator.openrouter_exhausted is False
+    assert used[-1][0] == "gsk_groq_1"
+
+    # Wait past cooldown and clear OpenRouter error
+    time.sleep(0.08)
+    should_fail_or["flag"] = False
+    rotator.invoke("msg2")
+    assert used[-1][0] == "sk-or-v1-router_1"
+
+
+def test_rotating_llm_groq_large_output_uses_high_otpm_model(monkeypatch):
+    from llm_verifier import RotatingLLM
+
+    monkeypatch.delenv("OPENROUTER_API_KEY1", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_1")
+    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+
+    models_tried = []
+
+    class MockChatOpenAI:
+        def __init__(self, api_key, model="", **kwargs):
+            self.model = model
+
+        def invoke(self, messages):
+            models_tried.append(self.model)
+            class Resp:
+                content = '{"questions": []}'
+            return Resp()
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", MockChatOpenAI)
+
+    rotator = RotatingLLM(max_cooldown_wait=0.0)
+    rotator.invoke("generate 20 questions", max_tokens=4500)
+    assert models_tried == ["openai/gpt-oss-120b"]
