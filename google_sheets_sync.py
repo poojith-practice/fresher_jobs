@@ -266,7 +266,8 @@ def merge_job_rows(
         else:
             if row[11]:
                 merged[existing_index][11] = row[11]
-            if row[12]:
+            existing_doc = str(merged[existing_index][12] or "").strip()
+            if row[12] and (str(row[12]).strip().startswith("http") or not existing_doc.startswith("http")):
                 merged[existing_index][12] = row[12]
             if len(row) > 13 and row[13] and row[13] != "Not found from RocketReach":
                 merged[existing_index][13] = row[13]

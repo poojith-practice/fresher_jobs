@@ -189,7 +189,7 @@ class RotatingLLM:
                                 model=g_model,
                                 temperature=0.1,
                                 max_tokens=max_tokens or 600,
-                                model_kwargs={"reasoning_effort": "none"} if "qwen" in g_model else {},
+                                model_kwargs={"reasoning_effort": "none"} if "qwen" in g_model else ({"reasoning_effort": "low"} if "gpt-oss" in g_model else {}),
                             )
                             res = client.invoke(messages)
                             if not _extract_text(res):

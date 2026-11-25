@@ -331,3 +331,27 @@ def test_runner_pending_only_and_sync_sheet(tmp_path, monkeypatch):
     assert stats["sheet_rows_updated"] == 1
     assert len(synced_calls) == 1
     assert synced_calls[0][0]["interview_doc_url"] == "https://drive.google.com/file/d/abc123/view"
+
+
+def test_merge_sheet_rows_preserves_existing_drive_url():
+    from google_sheets_sync import merge_job_rows
+
+    existing_url = "https://drive.google.com/file/d/keep_me/view?usp=drivesdk"
+    base = [
+        "Software Engineer", "TestCorp", "Bangalore", "Software Engineer",
+        "2026-11-25", "0-1 Yrs", "Competitive", "Competitive",
+        "https://example.com/job/99", "LINKEDIN", "2026-11-25 10:00", "Python, SQL",
+        existing_url, "Not found from RocketReach",
+    ]
+    incoming_pending = list(base)
+    incoming_pending[12] = "Pending Generation"
+
+    merged = merge_job_rows([base], [incoming_pending])
+    assert len(merged) == 1
+    assert merged[0][12] == existing_url
+
+    new_url = "https://drive.google.com/file/d/newer/view?usp=drivesdk"
+    incoming_real = list(base)
+    incoming_real[12] = new_url
+    merged2 = merge_job_rows([base], [incoming_real])
+    assert merged2[0][12] == new_url

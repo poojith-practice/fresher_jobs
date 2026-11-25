@@ -29,6 +29,7 @@ playwright>=1.40.0
 reportlab>=4.0.0
 ddgs>=9.0.0
 httpx>=0.25.0
+json-repair>=0.30.0
 
 # PostgreSQL 16 Driver (Optional - SQLite fallback included)
 psycopg2-binary>=2.9.0
