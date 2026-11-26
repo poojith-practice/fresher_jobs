@@ -295,11 +295,14 @@ def hydrate_linkedin_description(
         except Exception as e:
             logger.debug("Direct ATS description fetch skipped for %s: %s", direct_url, e)
 
-    # 2. Check LinkedIn hydration cooldown
+    # 2. Check LinkedIn hydration cooldown (briefly wait instead of dropping the job)
     global _LINKEDIN_HYDRATION_COOLDOWN_UNTIL
+    wait_rem = 0.0
     with _LINKEDIN_LOCK:
         if time.time() < _LINKEDIN_HYDRATION_COOLDOWN_UNTIL:
-            return
+            wait_rem = min(5.0, _LINKEDIN_HYDRATION_COOLDOWN_UNTIL - time.time())
+    if wait_rem > 0:
+        time.sleep(wait_rem)
 
     effective_url = safe_str(raw_job.get("job_url_direct") or raw_job.get("job_url") or raw_job.get("id"))
     jid_match = re.search(r"(\d{8,12})", effective_url)
@@ -324,30 +327,38 @@ def hydrate_linkedin_description(
         _LINKEDIN_HYDRATION_STATS["requests"] += 1
 
     effective_proxies = proxies if proxies is not None else (JOBSPY_PROXIES or None)
-    proxy_dict = None
     if effective_proxies:
-        proxy_url = random.choice(effective_proxies)
-        proxy_dict = {"http": proxy_url, "https": proxy_url}
-
-    req_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 6}
-    if proxy_dict:
-        req_kwargs["proxies"] = proxy_dict
+        proxy_candidates = random.sample(effective_proxies, min(3, len(effective_proxies)))
+    else:
+        proxy_candidates = [None]
 
     try:
-        if session is not None:
-            resp = session.get(url, **req_kwargs)
-        else:
-            try:
-                from curl_cffi import requests as cffi_requests
-                s = cffi_requests.Session(impersonate="chrome")
-                cffi_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 8}
-                if proxy_dict:
-                    cffi_kwargs["proxies"] = proxy_dict
-                resp = s.get(url, **cffi_kwargs)
-            except Exception:
-                resp = requests.get(url, **req_kwargs)
+        resp = None
+        for attempt_idx, proxy_url in enumerate(proxy_candidates):
+            proxy_dict = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            req_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 6}
+            if proxy_dict:
+                req_kwargs["proxies"] = proxy_dict
 
-        if resp.status_code == 200:
+            if session is not None:
+                resp = session.get(url, **req_kwargs)
+            else:
+                try:
+                    from curl_cffi import requests as cffi_requests
+                    s = cffi_requests.Session(impersonate="chrome")
+                    cffi_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 8}
+                    if proxy_dict:
+                        cffi_kwargs["proxies"] = proxy_dict
+                    resp = s.get(url, **cffi_kwargs)
+                except Exception:
+                    resp = requests.get(url, **req_kwargs)
+
+            if resp.status_code not in (429, 403, 999):
+                break
+            if attempt_idx < len(proxy_candidates) - 1:
+                time.sleep(0.4)
+
+        if resp is not None and resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
             desc_div = soup.find("div", class_="show-more-less-html__markup")
             desc_text = desc_div.get_text("\n").strip() if desc_div else soup.get_text("\n").strip()
@@ -359,15 +370,14 @@ def hydrate_linkedin_description(
             else:
                 with _LINKEDIN_HYDRATION_LOCK:
                     _LINKEDIN_HYDRATION_STATS["failures"] += 1
-        elif resp.status_code in (429, 403, 999):
-            logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s. Cooling down hydration for 20s.", resp.status_code, jid)
+        elif resp is not None and resp.status_code in (429, 403, 999):
+            logger.warning("LinkedIn guest endpoint rate-limited/blocked (HTTP %s) for job %s after %d attempt(s). Cooling down hydration for 5s.", resp.status_code, jid, len(proxy_candidates))
             with _LINKEDIN_HYDRATION_LOCK:
                 _LINKEDIN_HYDRATION_STATS["rate_limited"] += 1
                 _LINKEDIN_HYDRATION_STATS["failures"] += 1
             with _LINKEDIN_LOCK:
-                # Apply temporary 20-second cooldown on hydration without halting search queries
-                _LINKEDIN_HYDRATION_COOLDOWN_UNTIL = time.time() + 20.0
-            time.sleep(1.0)
+                _LINKEDIN_HYDRATION_COOLDOWN_UNTIL = time.time() + 5.0
+            time.sleep(0.5)
         else:
             with _LINKEDIN_HYDRATION_LOCK:
                 _LINKEDIN_HYDRATION_STATS["failures"] += 1
@@ -1060,7 +1070,7 @@ def scrape_fresher_jobs(
             legit, _ = is_legitimate_company(company_clean, title_clean)
             loc_ok, _ = is_valid_location(loc_clean, search_city=raw_job.get("search_city"))
             if within_h and legit and loc_ok:
-                hydrate_linkedin_description(raw_job, session=li_sess, proxies=proxies)
+                hydrate_linkedin_description(raw_job, session=None, proxies=proxies)
                 time.sleep(0.5)
 
         # 4. Evaluate criteria (freshness, fresher experience, anti-scam blacklist)
@@ -1089,7 +1099,7 @@ def scrape_fresher_jobs(
             and _only_missing_experience(evaluated)
         ):
             if source == "linkedin" and len(safe_str(evaluated.get("description"))) < 150:
-                hydrate_linkedin_description(evaluated, session=li_sess, proxies=proxies)
+                hydrate_linkedin_description(evaluated, session=None, proxies=proxies)
                 time.sleep(0.5)
                 evaluated = evaluate_job(evaluated, max_hours=hours_old)
 
