@@ -60,7 +60,7 @@ _LINKEDIN_DESCRIPTION_CACHE: Dict[str, str] = {}
 
 
 # Rate limit, concurrency control, and hydration telemetry
-_LINKEDIN_MAX_REQUESTS = int(os.getenv("MAX_LINKEDIN_REQUESTS", "45"))
+_LINKEDIN_MAX_REQUESTS = int(os.getenv("MAX_LINKEDIN_REQUESTS", "250"))
 _LINKEDIN_REQUEST_COUNT = 0
 _LINKEDIN_BACKOFF_DELAY = 1.5
 _LINKEDIN_RATE_LIMITED: bool = False
@@ -575,9 +575,9 @@ def run_scraping_query(
                         _LINKEDIN_CONSECUTIVE_429 += 1
                         _LINKEDIN_SEARCH_COOLDOWN_UNTIL = time.time() + 25.0
                         logger.warning("LinkedIn search 429 rate-limited. Cooling down search for 25s (streak: %d).", _LINKEDIN_CONSECUTIVE_429)
-                        if _LINKEDIN_CONSECUTIVE_429 >= 5:
+                        if _LINKEDIN_CONSECUTIVE_429 >= 15:
                             _LINKEDIN_RATE_LIMITED = True
-                            logger.warning("LinkedIn tripped breaker after 5 consecutive 429 rate-limits.")
+                            logger.warning("LinkedIn tripped breaker after 15 consecutive 429 rate-limits.")
                     elif req_status == "success":
                         _LINKEDIN_CONSECUTIVE_429 = 0
 
@@ -614,9 +614,9 @@ def run_scraping_query(
                     if req_status == "rate_limited":
                         _LINKEDIN_CONSECUTIVE_429 += 1
                         _LINKEDIN_SEARCH_COOLDOWN_UNTIL = time.time() + 25.0
-                        if _LINKEDIN_CONSECUTIVE_429 >= 5:
+                        if _LINKEDIN_CONSECUTIVE_429 >= 15:
                             _LINKEDIN_RATE_LIMITED = True
-                            logger.warning("LinkedIn tripped breaker after 5 consecutive 429 exceptions.")
+                            logger.warning("LinkedIn tripped breaker after 15 consecutive 429 exceptions.")
 
             diag = {
                 "board": site,

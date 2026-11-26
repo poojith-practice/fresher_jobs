@@ -48,6 +48,7 @@ jobs:
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID || '10VvfeWYKf0fTVuihc8nWYSpeipVZwSiz' }}
       # LinkedIn-only rotating proxy pool (Scenario A)
       JOBSPY_PROXIES: ${{ secrets.JOBSPY_PROXIES }}
+      MAX_LINKEDIN_REQUESTS: "250"
       # Brevo Student Job Alert Automation
       BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
       BREVO_LIST_ID: ${{ secrets.BREVO_LIST_ID || '477' }}
