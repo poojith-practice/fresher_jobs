@@ -27,12 +27,10 @@ _CACHED_LLM = None
 def get_groq_keys() -> list:
     """Returns a deduplicated list of active Groq API keys in priority order."""
     keys = []
-    names = [
-        "GROQ_API_KEY1", "GROQ_API_KEY_1",
-        "GROQ_API_KEY2", "GROQ_API_KEY_2",
-        "GROQ_API_KEY3", "GROQ_API_KEY_3",
-        "GROQ_API_KEY",
-    ]
+    names = []
+    for i in range(1, 21):
+        names.extend([f"GROQ_API_KEY{i}", f"GROQ_API_KEY_{i}"])
+    names.append("GROQ_API_KEY")
     for n in names:
         val = os.getenv(n, "").strip().lstrip("#").strip("\"'")
         if val and not val.startswith("YOUR_") and not val.startswith("gsk_PLACEHOLDER") and val not in keys:
@@ -43,12 +41,10 @@ def get_groq_keys() -> list:
 def get_openrouter_keys() -> list:
     """Returns a deduplicated list of active OpenRouter API keys in priority order."""
     keys = []
-    names = [
-        "OPENROUTER_API_KEY1", "OPENROUTER_API_KEY_1",
-        "OPENROUTER_API_KEY2", "OPENROUTER_API_KEY_2",
-        "OPENROUTER_API_KEY3", "OPENROUTER_API_KEY_3",
-        "OPENROUTER_API_KEY",
-    ]
+    names = []
+    for i in range(1, 21):
+        names.extend([f"OPENROUTER_API_KEY{i}", f"OPENROUTER_API_KEY_{i}"])
+    names.append("OPENROUTER_API_KEY")
     for n in names:
         val = os.getenv(n, "").strip().lstrip("#").strip("\"'")
         if val and not val.startswith("YOUR_") and not val.startswith("sk-or-PLACEHOLDER"):
@@ -173,7 +169,7 @@ class RotatingLLM:
                         if not _extract_text(res):
                             raise ValueError("OpenRouter returned empty response body")
                         with self._lock:
-                            self.active_openrouter_idx = idx
+                            self.active_openrouter_idx = (idx + 1) % len(self.openrouter_keys)
                             self._openrouter_cooldowns.pop(idx, None)
                         return res
                     except Exception as exc:
@@ -217,7 +213,7 @@ class RotatingLLM:
                             if not _extract_text(res):
                                 raise ValueError("Groq returned empty response body")
                             with self._lock:
-                                self.active_groq_idx = idx
+                                self.active_groq_idx = (idx + 1) % len(self.groq_keys)
                                 self._groq_cooldowns.pop(idx, None)
                             return res
                         except Exception as exc:

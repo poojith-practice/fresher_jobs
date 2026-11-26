@@ -162,20 +162,23 @@ def test_sheet_gate_requires_llm_approval():
     assert rows[0][8] == "https://example.com/job/1"
 
 
+def _clear_llm_env(monkeypatch):
+    for i in range(1, 21):
+        monkeypatch.delenv(f"OPENROUTER_API_KEY{i}", raising=False)
+        monkeypatch.delenv(f"OPENROUTER_API_KEY_{i}", raising=False)
+        monkeypatch.delenv(f"GROQ_API_KEY{i}", raising=False)
+        monkeypatch.delenv(f"GROQ_API_KEY_{i}", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+
 def test_rotating_llm_key_failover(monkeypatch):
     from llm_verifier import RotatingLLM
-    import os
 
     # Clear OpenRouter keys to test pure Groq failover
-    monkeypatch.delenv("OPENROUTER_API_KEY1", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-
+    _clear_llm_env(monkeypatch)
     monkeypatch.setenv("GROQ_API_KEY1", "key_fail_1")
     monkeypatch.setenv("GROQ_API_KEY2", "key_success_2")
-    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     call_history = []
 
@@ -199,9 +202,9 @@ def test_rotating_llm_key_failover(monkeypatch):
     assert "is_fresher_eligible" in res.content
     # Verified it tried key 1 first, failed on 429, then succeeded on key 2!
     assert call_history == ["key_fail_1", "key_success_2"]
-    assert rotator.active_groq_idx == 1
+    assert rotator.active_groq_idx == 0
 
-    # Next call should directly use key 2 without repeating key 1!
+    # Next call should directly use key 2 (since key 1 is in cooldown) without repeating key 1!
     rotator.invoke("second call")
     assert call_history == ["key_fail_1", "key_success_2", "key_success_2"]
 
@@ -210,14 +213,10 @@ def test_rotating_llm_openrouter_first_and_failover(monkeypatch):
     from llm_verifier import RotatingLLM
 
     # Set up 2 OpenRouter keys and 1 Groq key
+    _clear_llm_env(monkeypatch)
     monkeypatch.setenv("OPENROUTER_API_KEY1", "sk-or-v1-router_fail_1")
     monkeypatch.setenv("OPENROUTER_API_KEY2", "sk-or-v1-router_success_2")
-    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_fallback_1")
-    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     call_history = []
 
@@ -242,7 +241,7 @@ def test_rotating_llm_openrouter_first_and_failover(monkeypatch):
     assert "is_fresher_eligible" in res.content
     # Verified it tried OpenRouter Key 1 first, failed on 429, then succeeded on OpenRouter Key 2!
     assert call_history == ["sk-or-v1-router_fail_1", "sk-or-v1-router_success_2"]
-    assert rotator.active_openrouter_idx == 1
+    assert rotator.active_openrouter_idx == 0
 
     # Next call should directly use OpenRouter Key 2 without repeating Key 1!
     rotator.invoke("second call")
@@ -252,14 +251,9 @@ def test_rotating_llm_openrouter_first_and_failover(monkeypatch):
 def test_rotating_llm_falls_back_to_groq_when_openrouter_exhausted(monkeypatch):
     from llm_verifier import RotatingLLM
 
+    _clear_llm_env(monkeypatch)
     monkeypatch.setenv("OPENROUTER_API_KEY1", "sk-or-v1-router_fail_all")
-    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_success_1")
-    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     call_history = []
 
@@ -287,14 +281,9 @@ def test_rotating_llm_recovers_openrouter_after_cooldown(monkeypatch):
     import time
     from llm_verifier import RotatingLLM
 
+    _clear_llm_env(monkeypatch)
     monkeypatch.setenv("OPENROUTER_API_KEY1", "sk-or-v1-router_1")
-    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_1")
-    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     should_fail_or = {"flag": True}
     used = []
@@ -330,14 +319,8 @@ def test_rotating_llm_recovers_openrouter_after_cooldown(monkeypatch):
 def test_rotating_llm_groq_large_output_uses_high_otpm_model(monkeypatch):
     from llm_verifier import RotatingLLM
 
-    monkeypatch.delenv("OPENROUTER_API_KEY1", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY2", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY3", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _clear_llm_env(monkeypatch)
     monkeypatch.setenv("GROQ_API_KEY1", "gsk_groq_1")
-    monkeypatch.delenv("GROQ_API_KEY2", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY3", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
     models_tried = []
@@ -357,3 +340,36 @@ def test_rotating_llm_groq_large_output_uses_high_otpm_model(monkeypatch):
     rotator = RotatingLLM(max_cooldown_wait=0.0)
     rotator.invoke("generate 20 questions", max_tokens=4500)
     assert models_tried == ["openai/gpt-oss-120b"]
+
+
+def test_rotating_llm_discovers_all_12_keys_and_round_robins(monkeypatch):
+    from llm_verifier import RotatingLLM, get_groq_keys, get_openrouter_keys
+
+    for i in range(1, 7):
+        monkeypatch.setenv(f"OPENROUTER_API_KEY{i}", f"sk-or-v1-key{i}")
+        monkeypatch.setenv(f"GROQ_API_KEY{i}", f"gsk_key{i}")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    assert len(get_openrouter_keys()) == 6
+    assert len(get_groq_keys()) == 6
+
+    used_keys = []
+
+    class MockChatOpenAI:
+        def __init__(self, api_key, **kwargs):
+            self.api_key = api_key
+
+        def invoke(self, messages):
+            used_keys.append(self.api_key)
+            class Resp:
+                content = '{"ok": true}'
+            return Resp()
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", MockChatOpenAI)
+
+    rotator = RotatingLLM(max_cooldown_wait=0.0)
+    for _ in range(6):
+        rotator.invoke("test")
+
+    assert used_keys == [f"sk-or-v1-key{i}" for i in range(1, 7)]
