@@ -176,11 +176,16 @@ def test_location_validation():
     assert normalize_location_for_search("TS, India", "Hyderabad") == "Hyderabad, Telangana, India"
     assert normalize_location_for_search("Pune, India", "Mumbai") == "Pune, India"
 
-    # Major Indian tech hub targets (Noida, Pune, Bangalore, Hyderabad, Mumbai, etc.)
-    assert is_valid_location("Noida, India")[0] is True
+    # Target Indian tech hubs only (Mumbai, Pune, Hyderabad, Bangalore)
+    assert is_valid_location("Mumbai, India")[0] is True
     assert is_valid_location("Pune, India")[0] is True
+    assert is_valid_location("Hyderabad, India")[0] is True
     assert is_valid_location("Bengaluru, India")[0] is True
-    assert is_valid_location("Delhi, India")[0] is True
+    # Excluded Indian cities outside the 4 target hubs
+    assert is_valid_location("Noida, India")[0] is False
+    assert is_valid_location("Delhi, India")[0] is False
+    assert is_valid_location("Chennai, India")[0] is False
+    assert is_valid_location("Gurugram, Haryana, India")[0] is False
     # Foreign targets outside India
     assert is_valid_location("Dubai, UAE")[0] is False
     assert is_valid_location("London, UK")[0] is False

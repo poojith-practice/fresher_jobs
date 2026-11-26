@@ -6,7 +6,7 @@ MAX_HOURS_OLD = 48
 TARGET_SITES = ["freshersdunia", "campusdrive", "naukri", "indeed", "linkedin", "monsterindia"]
 UNSUPPORTED_SITES = []
 DEFAULT_LOCATIONS = [
-    "Bangalore", "Hyderabad", "Pune", "Mumbai", "Gurgaon", "Noida", "Chennai"
+    "Mumbai", "Pune", "Hyderabad", "Bangalore"
 ]
 INDEED_COUNTRY = "india"
 RESULTS_PER_QUERY = 25

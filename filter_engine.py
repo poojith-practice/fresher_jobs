@@ -373,14 +373,6 @@ def is_valid_location(
         # Pune
         "pune", "hinjewadi", "magarpatta", "kharadi", "vimannagar", "viman nagar", "baner",
         "wakad", "hadapsar", "bhosari", "kothrud", "pcmc", "pimpri", "chinchwad",
-        # Delhi NCR
-        "gurgaon", "gurugram", "noida", "greater noida", "delhi", "new delhi", "delhi ncr",
-        "ncr", "faridabad", "ghaziabad", "haryana",
-        # Chennai
-        "chennai", "omr", "sholinganallur", "guindy", "taramani", "siruseri", "tamil nadu", "tn",
-        # Other Tech Cities
-        "kolkata", "ahmedabad", "kochi", "cochin", "chandigarh", "mohali", "indore", "jaipur",
-        "coimbatore", "trivandrum", "thiruvananthapuram", "bhubaneswar", "lucknow",
         # Remote & Pan-India
         "remote", "work from home", "wfh", "anywhere in india", "pan india", "pan-india", "all india", "hybrid"
     ]
