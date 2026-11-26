@@ -1,5 +1,7 @@
 """Production configuration for the Fresher Job Scraper pipeline."""
 
+import os
+
 MAX_HOURS_OLD = 48
 TARGET_SITES = ["freshersdunia", "campusdrive", "naukri", "indeed", "linkedin", "monsterindia"]
 UNSUPPORTED_SITES = []
@@ -10,7 +12,8 @@ INDEED_COUNTRY = "india"
 RESULTS_PER_QUERY = 25
 QUERY_DELAY_SECONDS = 1.0
 QUERY_CONCURRENCY = 3
-JOBSPY_PROXIES = []
+_raw_proxies = os.getenv("JOBSPY_PROXIES", "")
+JOBSPY_PROXIES = [p.strip() for p in _raw_proxies.replace("\n", ",").split(",") if p.strip()]
 MAX_ALLOWED_EXPERIENCE_YEARS = 1.0
 
 ROLE_QUERIES = {

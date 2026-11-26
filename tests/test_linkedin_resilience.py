@@ -224,3 +224,81 @@ def test_rotating_llm_reuses_cached_clients():
         assert c1 is c2
         assert c1 is not c3
         assert mock_cls.call_count == 2
+
+
+def test_config_parses_jobspy_proxies_env(monkeypatch):
+    """Verify config.JOBSPY_PROXIES parses comma/newline-separated proxy URLs from env."""
+    import importlib
+    import config
+
+    monkeypatch.setenv("JOBSPY_PROXIES", "http://u1:p1@p.webshare.io:80, http://u2:p2@p.webshare.io:80\n")
+    importlib.reload(config)
+    try:
+        assert config.JOBSPY_PROXIES == [
+            "http://u1:p1@p.webshare.io:80",
+            "http://u2:p2@p.webshare.io:80",
+        ]
+    finally:
+        monkeypatch.delenv("JOBSPY_PROXIES", raising=False)
+        importlib.reload(config)
+
+
+def test_scenario_a_routes_proxies_only_to_linkedin():
+    """Verify Scenario A: proxies are passed only to LinkedIn, never Indeed/Naukri/MonsterIndia."""
+    from scraper import run_scraping_query, reset_linkedin_run_counters
+
+    reset_linkedin_run_counters()
+    proxy_pool = ["http://vbtoxyue-1:pass@p.webshare.io:80"]
+    seen_proxies = {}
+
+    def fake_scrape_jobs(**kwargs):
+        site = kwargs["site_name"][0]
+        seen_proxies[site] = kwargs.get("proxies")
+        return pd.DataFrame()
+
+    def fake_foundit(**kwargs):
+        seen_proxies["monsterindia"] = kwargs.get("proxies")
+        return pd.DataFrame()
+
+    with patch("scraper.scrape_jobs", side_effect=fake_scrape_jobs), \
+         patch("foundit_scraper.scrape_foundit_jobs", side_effect=fake_foundit), \
+         patch("scraper.time.sleep"):
+        run_scraping_query(
+            search_term="software engineer",
+            location="Bangalore",
+            sites=["linkedin", "indeed", "naukri", "monsterindia"],
+            proxies=proxy_pool,
+        )
+
+    assert seen_proxies["linkedin"] == proxy_pool
+    assert seen_proxies["indeed"] is None
+    assert seen_proxies["naukri"] is None
+    assert seen_proxies["monsterindia"] is None
+
+
+def test_hydrate_linkedin_description_uses_proxy_for_guest_api():
+    """Verify LinkedIn guest JD hydration routes through the provided proxy pool."""
+    reset_linkedin_run_counters()
+    proxy_pool = ["http://vbtoxyue-1:pass@p.webshare.io:80"]
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = '<div class="show-more-less-html__markup">0-1 years experience required.</div>'
+
+    mock_session = MagicMock()
+    mock_session.get.return_value = mock_resp
+
+    raw_job = {
+        "title": "Junior Software Engineer",
+        "company": "Acme",
+        "job_url": "https://www.linkedin.com/jobs/view/4493974999",
+        "description": None,
+    }
+    hydrate_linkedin_description(raw_job, session=mock_session, proxies=proxy_pool)
+
+    assert "0-1 years experience required" in (raw_job.get("description") or "")
+    _, call_kwargs = mock_session.get.call_args
+    assert call_kwargs["proxies"] == {
+        "http": "http://vbtoxyue-1:pass@p.webshare.io:80",
+        "https": "http://vbtoxyue-1:pass@p.webshare.io:80",
+    }

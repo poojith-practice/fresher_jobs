@@ -650,13 +650,28 @@ def hydrate_job_description(job: Dict[str, Any]) -> str:
                     "Accept-Language": "en-US,en;q=0.9",
                 }
                 url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{li_id}"
+                proxy_dict = None
+                try:
+                    import random
+                    from config import JOBSPY_PROXIES
+                    if JOBSPY_PROXIES:
+                        proxy_url = random.choice(JOBSPY_PROXIES)
+                        proxy_dict = {"http": proxy_url, "https": proxy_url}
+                except Exception:
+                    proxy_dict = None
                 try:
                     from curl_cffi import requests as cffi_requests
                     s = cffi_requests.Session(impersonate="chrome")
-                    res = s.get(url, headers=headers, timeout=8)
+                    cffi_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 8}
+                    if proxy_dict:
+                        cffi_kwargs["proxies"] = proxy_dict
+                    res = s.get(url, **cffi_kwargs)
                 except Exception:
                     import requests
-                    res = requests.get(url, headers=headers, timeout=6)
+                    req_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 6}
+                    if proxy_dict:
+                        req_kwargs["proxies"] = proxy_dict
+                    res = requests.get(url, **req_kwargs)
 
                 if res.status_code == 200:
                     soup = BeautifulSoup(res.text, "html.parser")

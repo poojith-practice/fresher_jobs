@@ -10,6 +10,7 @@ import os
 import re
 import time
 import math
+import random
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -257,7 +258,11 @@ def clean_str(val: Any) -> str:
     return "".join(c.lower() for c in text if c.isalnum() or c.isspace()).strip()
 
 
-def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any] = None) -> None:
+def hydrate_linkedin_description(
+    raw_job: Dict[str, Any],
+    session: Optional[Any] = None,
+    proxies: Optional[List[str]] = None,
+) -> None:
     """
     Hydrates full job description for candidate LinkedIn jobs via direct ATS or LinkedIn guest endpoint.
     Guarantees that explicit experience requirements in JD (e.g. 1-3 yrs, 5+ yrs) are captured.
@@ -318,16 +323,29 @@ def hydrate_linkedin_description(raw_job: Dict[str, Any], session: Optional[Any]
     with _LINKEDIN_HYDRATION_LOCK:
         _LINKEDIN_HYDRATION_STATS["requests"] += 1
 
+    effective_proxies = proxies if proxies is not None else (JOBSPY_PROXIES or None)
+    proxy_dict = None
+    if effective_proxies:
+        proxy_url = random.choice(effective_proxies)
+        proxy_dict = {"http": proxy_url, "https": proxy_url}
+
+    req_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 6}
+    if proxy_dict:
+        req_kwargs["proxies"] = proxy_dict
+
     try:
         if session is not None:
-            resp = session.get(url, headers=headers, timeout=6)
+            resp = session.get(url, **req_kwargs)
         else:
             try:
                 from curl_cffi import requests as cffi_requests
                 s = cffi_requests.Session(impersonate="chrome")
-                resp = s.get(url, headers=headers, timeout=8)
+                cffi_kwargs: Dict[str, Any] = {"headers": headers, "timeout": 8}
+                if proxy_dict:
+                    cffi_kwargs["proxies"] = proxy_dict
+                resp = s.get(url, **cffi_kwargs)
             except Exception:
-                resp = requests.get(url, headers=headers, timeout=6)
+                resp = requests.get(url, **req_kwargs)
 
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -455,7 +473,7 @@ def run_scraping_query(
                     location=location,
                     results_wanted=results_wanted,
                     hours_old=hours_old,
-                    proxies=proxies,
+                    proxies=None,
                 )
                 end_time = time.time()
                 status = "success" if len(df) > 0 else "empty"
@@ -495,6 +513,10 @@ def run_scraping_query(
                 }
                 return site, pd.DataFrame(), diag
 
+            # Scenario A: Route proxies strictly to LinkedIn to preserve bandwidth
+            # on direct cloud-friendly boards (Indeed, Naukri, MonsterIndia).
+            site_proxies = proxies if site == "linkedin" else None
+
             call = lambda: scrape_jobs(
                 site_name=[site],
                 search_term=search_term,
@@ -502,7 +524,7 @@ def run_scraping_query(
                 results_wanted=results_wanted,
                 hours_old=hours_old,
                 country_indeed=INDEED_COUNTRY,
-                proxies=proxies,
+                proxies=site_proxies,
                 fetch_description=False,
                 verbose=0,
             )
@@ -1038,7 +1060,7 @@ def scrape_fresher_jobs(
             legit, _ = is_legitimate_company(company_clean, title_clean)
             loc_ok, _ = is_valid_location(loc_clean, search_city=raw_job.get("search_city"))
             if within_h and legit and loc_ok:
-                hydrate_linkedin_description(raw_job, session=li_sess)
+                hydrate_linkedin_description(raw_job, session=li_sess, proxies=proxies)
                 time.sleep(0.5)
 
         # 4. Evaluate criteria (freshness, fresher experience, anti-scam blacklist)
@@ -1067,7 +1089,7 @@ def scrape_fresher_jobs(
             and _only_missing_experience(evaluated)
         ):
             if source == "linkedin" and len(safe_str(evaluated.get("description"))) < 150:
-                hydrate_linkedin_description(evaluated, session=li_sess)
+                hydrate_linkedin_description(evaluated, session=li_sess, proxies=proxies)
                 time.sleep(0.5)
                 evaluated = evaluate_job(evaluated, max_hours=hours_old)
 
