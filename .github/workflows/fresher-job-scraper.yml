@@ -28,6 +28,7 @@ jobs:
     timeout-minutes: 50
     env:
       GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+      GOOGLE_SPREADSHEET_ID_2: ${{ secrets.GOOGLE_SPREADSHEET_ID_2 || '1ryl5GtmHKgahxlqJxyufONoNVot62KpjzOkfOHrixY8' }}
       GOOGLE_SERVICE_ACCOUNT_FILE: credentials.json
       GOOGLE_JOBS_WORKSHEET: Sheet1
       # LLM API Keys passed from GitHub Secrets (Rotating multi-key pool: OpenRouter primary, Groq fallback)

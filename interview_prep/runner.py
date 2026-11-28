@@ -171,8 +171,12 @@ def sync_interview_docs_to_sheet(
     if not updates_by_url and not updates_by_key:
         return 0
 
-    sid = spreadsheet_id or os.getenv("GOOGLE_SPREADSHEET_ID")
-    if not sid:
+    if spreadsheet_id:
+        sids = [spreadsheet_id]
+    else:
+        from google_sheets_sync import get_configured_spreadsheet_ids
+        sids = get_configured_spreadsheet_ids()
+    if not sids:
         logger.warning("Cannot sync interview docs to sheet: GOOGLE_SPREADSHEET_ID not set.")
         return 0
 
@@ -183,45 +187,47 @@ def sync_interview_docs_to_sheet(
         logger.warning("Cannot sync interview docs to sheet: credentials not found at %s", cred_path)
         return 0
 
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        from google_sheets_sync import _get_jobs_worksheet, _find_jobs_header_row
+    total_updated = 0
+    for sid in sids:
+        try:
+            import gspread
+            from google.oauth2.service_account import Credentials
+            from google_sheets_sync import _get_jobs_worksheet, _find_jobs_header_row
 
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds = Credentials.from_service_account_file(cred_path, scopes=scopes)
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(sid)
-        ws = _get_jobs_worksheet(spreadsheet)
-        header_row = _find_jobs_header_row(ws) or 3
-        data_start_row = header_row + 1
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+            creds = Credentials.from_service_account_file(cred_path, scopes=scopes)
+            client = gspread.authorize(creds)
+            spreadsheet = client.open_by_key(sid)
+            ws = _get_jobs_worksheet(spreadsheet)
+            header_row = _find_jobs_header_row(ws) or 3
+            data_start_row = header_row + 1
 
-        all_values = ws.get(f"A{data_start_row}:M")
-        batch_cells = []
-        for offset, row in enumerate(all_values):
-            row_num = data_start_row + offset
-            title = str(row[0] or "").strip().casefold() if len(row) > 0 else ""
-            company = str(row[1] or "").strip().casefold() if len(row) > 1 else ""
-            apply_url = str(row[8] or "").strip().casefold() if len(row) > 8 else ""
-            existing_doc = str(row[12] or "").strip() if len(row) > 12 else ""
+            all_values = ws.get(f"A{data_start_row}:M")
+            batch_cells = []
+            for offset, row in enumerate(all_values):
+                row_num = data_start_row + offset
+                title = str(row[0] or "").strip().casefold() if len(row) > 0 else ""
+                company = str(row[1] or "").strip().casefold() if len(row) > 1 else ""
+                apply_url = str(row[8] or "").strip().casefold() if len(row) > 8 else ""
+                existing_doc = str(row[12] or "").strip() if len(row) > 12 else ""
 
-            if existing_doc.startswith("http"):
-                continue
+                if existing_doc.startswith("http"):
+                    continue
 
-            new_url = updates_by_url.get(apply_url) or updates_by_key.get((title, company))
-            if new_url:
-                batch_cells.append({"range": f"M{row_num}", "values": [[new_url]]})
+                new_url = updates_by_url.get(apply_url) or updates_by_key.get((title, company))
+                if new_url:
+                    batch_cells.append({"range": f"M{row_num}", "values": [[new_url]]})
 
-        if batch_cells:
-            ws.batch_update(batch_cells, value_input_option="USER_ENTERED")
-            logger.info("[✓] Updated %d 'Interview QnA doc' link(s) in Google Sheet '%s'.", len(batch_cells), ws.title)
-        return len(batch_cells)
-    except Exception as exc:
-        logger.error("Failed syncing interview doc links to Google Sheet: %s", exc)
-        return 0
+            if batch_cells:
+                ws.batch_update(batch_cells, value_input_option="USER_ENTERED")
+                logger.info("[✓] Updated %d 'Interview QnA doc' link(s) in Google Sheet '%s' (%s).", len(batch_cells), ws.title, sid)
+                total_updated += len(batch_cells)
+        except Exception as exc:
+            logger.error("Failed syncing interview doc links to Google Sheet %s: %s", sid, exc)
+    return total_updated
 
 
 def run_interview_docs(

@@ -589,11 +589,29 @@ def sync_to_live_google_sheet(
         return False
 
 
+def get_configured_spreadsheet_ids() -> List[str]:
+    """Return deduplicated Google Spreadsheet IDs from GOOGLE_SPREADSHEET_ID (comma-separated) and GOOGLE_SPREADSHEET_ID_2."""
+    raw_values = [
+        os.getenv("GOOGLE_SPREADSHEET_ID", ""),
+        os.getenv("GOOGLE_SHEET_ID", ""),
+        os.getenv("GOOGLE_SPREADSHEET_ID_2", ""),
+        os.getenv("GOOGLE_SHEET_ID_2", ""),
+    ]
+    ids: List[str] = []
+    for raw in raw_values:
+        for part in str(raw or "").replace("\n", ",").split(","):
+            sid = part.strip()
+            if sid and sid != "YOUR_GOOGLE_SHEET_ID_HERE" and sid not in ids:
+                ids.append(sid)
+    return ids
+
+
 def get_existing_sheet_job_urls() -> set:
-    """Return normalized lowercase Apply URLs already present in Sheet1, or empty set on skip/error."""
-    spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
-    if not spreadsheet_id or spreadsheet_id == "YOUR_GOOGLE_SHEET_ID_HERE":
+    """Return normalized lowercase Apply URLs already present in primary Sheet1, or empty set on skip/error."""
+    ids = get_configured_spreadsheet_ids()
+    if not ids:
         return set()
+    spreadsheet_id = ids[0]
     if not os.path.exists(CREDENTIALS_FILE):
         return set()
     try:
@@ -621,18 +639,23 @@ def sync_configured_google_sheet(
     require_salary: bool = False,
     newly_added_out: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[bool]:
-    """Sync the latest run when a spreadsheet ID is configured; None means disabled."""
-    spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
-    if not spreadsheet_id or spreadsheet_id == "YOUR_GOOGLE_SHEET_ID_HERE":
+    """Sync the latest run to all configured spreadsheet IDs; None means disabled."""
+    ids = get_configured_spreadsheet_ids()
+    if not ids:
         print("[*] Google Sheets sync skipped: GOOGLE_SPREADSHEET_ID is not configured.")
         return None
-    return sync_to_live_google_sheet(
-        spreadsheet_id,
-        jobs=jobs,
-        hr_leads=hr_leads,
-        require_salary=require_salary,
-        newly_added_out=newly_added_out,
-    )
+    any_success = False
+    for idx, sid in enumerate(ids):
+        ok = sync_to_live_google_sheet(
+            sid,
+            jobs=jobs,
+            hr_leads=hr_leads,
+            require_salary=require_salary,
+            newly_added_out=newly_added_out if idx == 0 else None,
+        )
+        if ok:
+            any_success = True
+    return any_success
 
 if __name__ == "__main__":
     import argparse
