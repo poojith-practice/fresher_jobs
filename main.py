@@ -363,10 +363,10 @@ def main():
         except Exception as exc:
             print(f"[!] Interview prep generation encountered an error: {exc}")
 
-    # 2c. Send Brevo Dynamic Job Alert Digest for genuinely newly added Sheet1 rows
+    # 2c. Send Brevo Dynamic Job Alert Digest (Email + WhatsApp) for genuinely newly added Sheet1 rows
     if synced is True and newly_synced_jobs and not getattr(args, "diagnostic_only", False):
         try:
-            from brevo_notifier import send_job_alert_digest
+            from brevo_notifier import send_job_alert_digest, send_whatsapp_job_alert
             brevo_res = send_job_alert_digest(newly_synced_jobs)
             if brevo_res.get("sent"):
                 print(
@@ -377,6 +377,18 @@ def main():
                 print(
                     f"[*] Brevo Alert status: {brevo_res.get('reason')} "
                     f"({brevo_res.get('errors') or brevo_res.get('error') or 'skipped'})"
+                )
+
+            wa_res = send_whatsapp_job_alert(newly_synced_jobs)
+            if wa_res.get("sent") or wa_res.get("partial"):
+                print(
+                    f"[✓] Brevo WhatsApp Alert: Sent {wa_res.get('jobs_count')} job(s) "
+                    f"to {wa_res.get('sent_count')}/{wa_res.get('total_recipients')} student(s)."
+                )
+            else:
+                print(
+                    f"[*] Brevo WhatsApp status: {wa_res.get('reason')} "
+                    f"({wa_res.get('errors') or wa_res.get('error') or 'skipped'})"
                 )
         except Exception as exc:
             print(f"[!] Brevo alert notification encountered an error: {exc}")

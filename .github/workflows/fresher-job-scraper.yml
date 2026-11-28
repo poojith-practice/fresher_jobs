@@ -56,12 +56,15 @@ jobs:
       # LinkedIn-only rotating proxy pool (Scenario A)
       JOBSPY_PROXIES: ${{ secrets.JOBSPY_PROXIES }}
       MAX_LINKEDIN_REQUESTS: "250"
-      # Brevo Student Job Alert Automation
+      # Brevo Student Job Alert Automation (Email + WhatsApp)
       BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
       BREVO_LIST_ID: ${{ secrets.BREVO_LIST_ID || '477' }}
       BREVO_TEMPLATE_ID: ${{ secrets.BREVO_TEMPLATE_ID || '379' }}
       BREVO_SENDER_EMAIL: ${{ secrets.BREVO_SENDER_EMAIL || 'sandeepjethani4@gmail.com' }}
       BREVO_SENDER_NAME: ${{ secrets.BREVO_SENDER_NAME || 'Quantum Learnings' }}
+      BREVO_WHATSAPP_TEMPLATE_ID: ${{ secrets.BREVO_WHATSAPP_TEMPLATE_ID || '122' }}
+      BREVO_WHATSAPP_SENDER: ${{ secrets.BREVO_WHATSAPP_SENDER || '917703937183' }}
+      BREVO_WHATSAPP_ENABLED: ${{ secrets.BREVO_WHATSAPP_ENABLED || 'true' }}
 
     steps:
       - name: Verify Google Sheets secrets are configured

@@ -2,8 +2,11 @@ from unittest.mock import MagicMock, patch
 
 from brevo_notifier import (
     fetch_list_recipients,
+    fetch_list_whatsapp_recipients,
     format_jobs_for_brevo,
+    format_jobs_for_whatsapp,
     send_job_alert_digest,
+    send_whatsapp_job_alert,
 )
 
 
@@ -141,3 +144,63 @@ def test_send_job_alert_digest_handles_missing_key_and_api_errors_gracefully(mon
     assert res_err["sent"] is False
     assert res_err["reason"] == "api_error"
     assert "402" in res_err["errors"][0]
+
+
+def test_format_jobs_for_whatsapp_caps_slots_and_pads_to_5():
+    jobs = [
+        {"title": "Software Engineer", "company": "Qualcomm", "apply_url": "https://careers.qualcomm.com/job/1"},
+        {"title": "Very Long Job Title That Needs Truncation For WhatsApp Limit", "company": "Oracle Cloud Systems India Pvt Ltd", "apply_url": "https://ejgk.fa.em2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_3/job/30051984/?keyword=analyst"},
+    ]
+    slots = format_jobs_for_whatsapp(jobs, max_slot_len=130)
+    assert set(slots.keys()) == {"JOB1", "JOB2", "JOB3", "JOB4", "JOB5"}
+    assert all(len(v) <= 130 for v in slots.values())
+    assert slots["JOB3"] == "Check portal for more openings"
+    assert slots["JOB5"] == "Check portal for more openings"
+
+
+def test_send_whatsapp_job_alert_sends_5_jobs_to_active_contacts():
+    get_resp = MagicMock()
+    get_resp.ok = True
+    get_resp.json.return_value = {
+        "contacts": [
+            {"email": "a@example.com", "smsBlacklisted": False, "attributes": {"FIRSTNAME": "Aafiya Shaikh", "WHATSAPP": "9000326016"}},
+            {"email": "b@example.com", "smsBlacklisted": True, "attributes": {"FIRSTNAME": "OptedOut", "WHATSAPP": "919999999999"}},
+            {"email": "c@example.com", "smsBlacklisted": False, "attributes": {"FIRSTNAME": "", "SMS": "+91 98335 23711"}},
+        ]
+    }
+    post_resp = MagicMock()
+    post_resp.ok = True
+    post_resp.text = '{"messageId": "wa-msg-1"}'
+    post_resp.json.return_value = {"messageId": "wa-msg-1"}
+
+    jobs = [
+        {"title": f"Role {i}", "company": f"Comp {i}", "apply_url": f"https://example.com/j/{i}"}
+        for i in range(1, 7)
+    ]
+    with patch("brevo_notifier.requests.get", return_value=get_resp), \
+         patch("brevo_notifier.requests.post", return_value=post_resp) as mock_post:
+        res = send_whatsapp_job_alert(
+            jobs,
+            api_key="xkeysib-test",
+            list_id=477,
+            template_id=122,
+            sender_number="917703937183",
+        )
+
+    assert res["sent"] is True
+    assert res["sent_count"] == 2
+    assert res["jobs_count"] == 5
+    # 1st POST is /contacts/batch (JOB1..JOB5 attribute sync), 2nd POST is /whatsapp/sendMessage
+    assert mock_post.call_count == 2
+    batch_call = mock_post.call_args_list[0]
+    assert "/contacts/batch" in batch_call.args[0]
+    assert len(batch_call.kwargs["json"]["contacts"]) == 2
+    assert "Role 1 @ Comp 1" in batch_call.kwargs["json"]["contacts"][0]["attributes"]["JOB1"]
+
+    wa_call = mock_post.call_args_list[1]
+    assert "/whatsapp/sendMessage" in wa_call.args[0]
+    p1 = wa_call.kwargs["json"]
+    assert p1["senderNumber"] == "917703937183"
+    assert p1["contactNumbers"] == ["919000326016", "919833523711"]
+    assert p1["templateId"] == 122
+    assert "Role 1 @ Comp 1" in p1["params"]["JOB1"]
